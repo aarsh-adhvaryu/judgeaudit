@@ -8,10 +8,15 @@ died 95 seconds later. A hard power-off leaves no application log, so this scrip
 keeps one:
 
   watch   once a second, append charger state, battery level and GPU temperature,
-          power and throttle flags to a CSV (flushed to disk on every row). Stop
-          the judge server, so the load ends before the machine does, when the
-          charger goes offline, the GPU passes the temperature limit, its hotspot
-          gets too close to its own limit, or the GPU stops answering.
+          power and throttle flags to a CSV (flushed to disk on every row).
+          Soft limit: while the hotspot is close to its limit, or the laptop is in
+          a power mode above --max-power-limit, keep a pause file in place; the
+          judgeaudit runner starts no new judge call while it exists, so the GPU
+          cools with the model still loaded and nothing is lost.
+          Hard limit: stop the judge server, so the load ends before the machine
+          does, when the charger goes offline, the GPU passes the temperature
+          limit, its hotspot gets within --min-headroom of its limit, or the GPU
+          stops answering.
   check   exit 0 when it is safe to load the GPU, 1 when it is not yet, 2 when the
           GPU is gone and only a reboot brings it back (reason on stdout).
 
@@ -40,10 +45,12 @@ GPU_FIELDS = (
     "temperature.gpu.tlimit",
     "clocks_event_reasons.hw_thermal_slowdown",
     "clocks_event_reasons.hw_power_brake_slowdown",
+    "enforced.power.limit",
 )
 CSV_HEADER = (
     "time", "ac_online", "battery_pct", "gpu_temp_c", "gpu_power_w", "gpu_util_pct", "gpu_mem_mib",
-    "gpu_clock_mhz", "gpu_temp_headroom_c", "thermal_slowdown", "power_brake_slowdown", "gpu_reading_age_s", "note",
+    "gpu_clock_mhz", "gpu_temp_headroom_c", "thermal_slowdown", "power_brake_slowdown", "gpu_power_limit_w",
+    "gpu_reading_age_s", "note",
 )
 
 
@@ -62,6 +69,11 @@ class Sample:
     def headroom_c(self) -> float | None:
         # Degrees left before the GPU throttles itself, measured at its hottest sensor.
         return self.gpu[5]
+
+    @property
+    def power_limit_w(self) -> float | None:
+        # What the laptop's current performance mode lets the GPU draw.
+        return self.gpu[8]
 
 
 def parse_gpu_line(line: str) -> tuple:
@@ -90,6 +102,41 @@ def unsafe_reason(sample: Sample, temp_limit: float, min_headroom: float | None 
         return (f"GPU hotspot {sample.headroom_c:.0f} C from its throttle limit "
                 f"(stops at {min_headroom:.0f} C or less), GPU at {temp}")
     return None
+
+
+def over_power_reason(sample: Sample, max_power_limit: float | None) -> str | None:
+    if max_power_limit is not None and sample.power_limit_w is not None and sample.power_limit_w > max_power_limit:
+        return (f"GPU power limit is {sample.power_limit_w:.0f} W, above the {max_power_limit:.0f} W allowed: "
+                "switch the laptop to Balanced or Quiet mode (Fn+Q)")
+    return None
+
+
+class Pacer:
+    """Soft limit with hysteresis: pause at pause_headroom, resume at resume_headroom."""
+
+    def __init__(self, pause_headroom: float | None, resume_headroom: float, max_power_limit: float | None = None):
+        self.pause_headroom = pause_headroom
+        self.resume_headroom = resume_headroom
+        self.max_power_limit = max_power_limit
+        self._hot = False
+
+    def step(self, sample: Sample) -> str | None:
+        """Returns why new judge calls should wait, or None when they may run."""
+        headroom = sample.headroom_c
+        if self.pause_headroom is not None and headroom is not None:
+            if headroom <= self.pause_headroom:
+                self._hot = True
+            elif headroom >= self.resume_headroom:
+                self._hot = False
+        elif headroom is None:
+            self._hot = False  # no reading: the hard limit decides
+        power = over_power_reason(sample, self.max_power_limit)
+        if power:
+            return power
+        if self._hot:
+            return (f"GPU hotspot {headroom:.0f} C from its throttle limit, "
+                    f"cooling until {self.resume_headroom:.0f} C of headroom")
+        return None
 
 
 class Guard:
@@ -251,6 +298,9 @@ def watch(args) -> int:
                 os.fsync(handle.fileno())
 
     guard = Guard(args.temp_limit, kill=lambda: kill_image(args.image), log=log, min_headroom=args.min_headroom)
+    pacer = Pacer(args.pause_headroom if args.pause_file else None, args.resume_headroom, args.max_power_limit)
+    pause_file = Path(args.pause_file) if args.pause_file else None
+    pausing = False
     new_file = not csv_path.exists()
     with open(csv_path, "a", newline="", encoding="ascii") as handle:
         writer = csv.writer(handle)
@@ -263,6 +313,15 @@ def watch(args) -> int:
             gpu, age = reader.latest()
             sample = Sample(ac_online=ac, battery_pct=pct, gpu=gpu, gpu_age_s=age)
             note = guard.step(sample, time.monotonic())
+            wait_reason = pacer.step(sample) if pause_file else None
+            if wait_reason:
+                pause_file.write_text(wait_reason + "\n", encoding="ascii", errors="replace")  # rewritten = kept fresh
+                if not pausing:
+                    note = note or f"PAUSE: {wait_reason}"
+            elif pausing:
+                pause_file.unlink(missing_ok=True)
+                note = note or "resume"
+            pausing = bool(wait_reason)
             writer.writerow([f"{datetime.now():%Y-%m-%d %H:%M:%S}", _cell(ac), _cell(pct),
                              *[_cell(v) for v in gpu], _cell(age), note])
             handle.flush()
@@ -276,7 +335,7 @@ def check(args) -> int:
     if args.require_gpu and sample.temp_c is None:
         print("nvidia-smi does not see the GPU (hung or dropped by the driver): reboot before running again")
         return 2
-    reason = unsafe_reason(sample, args.temp_limit)
+    reason = unsafe_reason(sample, args.temp_limit) or over_power_reason(sample, args.max_power_limit)
     temp = "unknown" if sample.temp_c is None else f"{sample.temp_c:.0f} C"
     print(reason or f"ok (charger {'online' if ac else 'state unknown'}, GPU {temp})")
     return 1 if reason else 0
@@ -291,6 +350,10 @@ def main(argv: list[str] | None = None) -> int:
     w.add_argument("--temp-limit", type=float, default=90.0)
     w.add_argument("--min-headroom", type=float,
                    help="also trip when the hotspot is this many C or fewer from its throttle limit")
+    w.add_argument("--pause-file", help="keep this file in place while new judge calls should wait")
+    w.add_argument("--pause-headroom", type=float, default=8.0, help="pause when the hotspot headroom is this low")
+    w.add_argument("--resume-headroom", type=float, default=20.0, help="resume when it has recovered to this")
+    w.add_argument("--max-power-limit", type=float, help="pause while the GPU power limit (W) is above this")
     w.add_argument("--interval", type=float, default=1.0)
     w.add_argument("--image", default="llama-server.exe", help="process image to stop on a trip")
     w.add_argument("--parent-pid", type=int, help="exit when this process is gone")
@@ -298,6 +361,7 @@ def main(argv: list[str] | None = None) -> int:
     c = sub.add_parser("check", help="exit 0 when it is safe to load the GPU")
     c.add_argument("--temp-limit", type=float, default=75.0)
     c.add_argument("--require-gpu", action="store_true", help="exit 2 when nvidia-smi reports no GPU")
+    c.add_argument("--max-power-limit", type=float, help="not safe while the GPU power limit (W) is above this")
     c.set_defaults(func=check)
     args = parser.parse_args(argv)
     try:

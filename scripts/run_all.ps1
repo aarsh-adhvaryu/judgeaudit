@@ -12,13 +12,17 @@ the cache. Safe to stop with Ctrl+C and run again, also after the whole machine
 went down: finished audits come from the cache and finished speed measurements
 are skipped (-RedoBench measures them again).
 
-scripts\gpu_guard.py runs alongside: it logs charger state and GPU temperature and
-power once a second to logs\telemetry-<start>.csv, and stops llama-server when the
-charger goes offline, the GPU passes -TempLimit, its hotspot comes within
--MinHeadroom degrees of its throttle limit, or the GPU stops answering. The script
-then waits until it is safe and resumes; if the GPU is gone it stops and asks for a
-reboot instead of carrying on on the CPU. Everything printed here is also kept in
-logs\run_all-<start>.log.
+scripts\gpu_guard.py runs alongside and logs charger state and GPU temperature and
+power once a second to logs\telemetry-<start>.csv. It paces the work to the
+laptop's cooling: when the GPU hotspot comes within -PauseHeadroom degrees of its
+throttle limit, judgeaudit starts no new judge call until it has cooled (the model
+stays loaded, nothing is lost, and paused time is not counted in calls per second).
+It also holds the work while the laptop is in a power mode above -MaxGpuWatts.
+As a last resort it stops llama-server when the charger goes offline, the GPU
+passes -TempLimit, the hotspot comes within -MinHeadroom degrees of its limit, or
+the GPU stops answering; the script then waits until it is safe and resumes. If
+the GPU is gone it stops and asks for a reboot instead of carrying on on the CPU.
+Everything printed here is also kept in logs\run_all-<start>.log.
 
 -GpuPowerLimit 80 caps the GPU at 80 W for this boot (needs an administrator
 PowerShell and a driver that allows it; the script reports whether it took effect).
@@ -34,6 +38,8 @@ param(
     [switch]$RedoBench,
     [int]$TempLimit = 90,
     [int]$MinHeadroom = 3,
+    [int]$PauseHeadroom = 8,
+    [int]$MaxGpuWatts = 100,
     [int]$GpuPowerLimit = 0
 )
 
@@ -46,6 +52,8 @@ $CrashLog = Join-Path $LogDir "crashes.log"
 $Guard = Join-Path $Root "scripts\gpu_guard.py"
 $RunStamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $Telemetry = Join-Path $LogDir "telemetry-$RunStamp.csv"
+$PauseFile = Join-Path $LogDir "pause.flag"
+$env:JUDGEAUDIT_PAUSE_FILE = $PauseFile
 $Config = "configs\local_llamacpp.yaml"
 $env:PYTHONUNBUFFERED = "1"
 $Only = @($Only | ForEach-Object { $_ -split "," } | Where-Object { $_ })
@@ -95,6 +103,14 @@ function Get-Vram {
     }
 }
 
+function Get-GpuWatts {
+    try {
+        return [int][double]("" + (& nvidia-smi --query-gpu=enforced.power.limit --format=csv,noheader,nounits | Select-Object -First 1)).Trim()
+    } catch {
+        return 0
+    }
+}
+
 function Get-GpuLine {
     try {
         $line = & nvidia-smi --query-gpu=temperature.gpu,power.draw,memory.used,utilization.gpu --format=csv,noheader | Select-Object -First 1
@@ -138,7 +154,7 @@ function Stop-Guard {
 
 function Start-Guard {
     Stop-Guard
-    $argList = @("`"$Guard`"", "watch", "--csv", "`"$Telemetry`"", "--trip-log", "`"$CrashLog`"", "--temp-limit", "$TempLimit", "--min-headroom", "$MinHeadroom", "--parent-pid", "$PID")
+    $argList = @("`"$Guard`"", "watch", "--csv", "`"$Telemetry`"", "--trip-log", "`"$CrashLog`"", "--temp-limit", "$TempLimit", "--min-headroom", "$MinHeadroom", "--pause-file", "`"$PauseFile`"", "--pause-headroom", "$PauseHeadroom", "--max-power-limit", "$MaxGpuWatts", "--parent-pid", "$PID")
     Start-Process -FilePath $Py -ArgumentList $argList -NoNewWindow | Out-Null
 }
 
@@ -146,7 +162,7 @@ function Wait-Safe {
     # Blocks while the charger is offline or the GPU is still hot. Gives up after 30 minutes.
     $resumeBelow = $TempLimit - 15
     for ($i = 0; $i -lt 180; $i++) {
-        $why = & $Py $Guard check --temp-limit $resumeBelow --require-gpu
+        $why = & $Py $Guard check --temp-limit $resumeBelow --require-gpu --max-power-limit $MaxGpuWatts
         if ($LASTEXITCODE -eq 0) { return }
         if ($LASTEXITCODE -eq 2) { throw "$why" }
         if ($i % 6 -eq 0) { Say "not loading the GPU yet: $why" }
@@ -270,13 +286,13 @@ Stop-Server
 if ($GpuPowerLimit -gt 0) {
     & nvidia-smi -pl $GpuPowerLimit | Out-Host
 }
-# Speeds depend on the power the GPU may draw (laptop performance mode or -GpuPowerLimit): record it with every run.
-$GpuWatts = 0
-try { $GpuWatts = [int][double]("" + (& nvidia-smi --query-gpu=enforced.power.limit --format=csv,noheader,nounits | Select-Object -First 1)).Trim() } catch { }
-Say "GPU power limit in force: $GpuWatts W"
+# Speeds depend on the power the GPU may draw (laptop performance mode or -GpuPowerLimit): it is recorded with every model.
+$GpuWatts = Get-GpuWatts
+Say "GPU power limit in force: $GpuWatts W (the run holds while it is above $MaxGpuWatts W)"
 if ($GpuPowerLimit -gt 0 -and $GpuWatts -ne $GpuPowerLimit) { Say "the $GpuPowerLimit W cap did NOT take effect (needs an administrator PowerShell, and not every laptop driver allows it)" }
+Remove-Item $PauseFile -ErrorAction SilentlyContinue
 Start-Guard
-Say "gpu_guard is logging to $Telemetry and stops llama-server if the charger drops, the GPU reaches $TempLimit C, its hotspot is within $MinHeadroom C of its limit, or the GPU stops answering"
+Say "gpu_guard logs to $Telemetry, pauses new judge calls when the GPU hotspot is within $PauseHeadroom C of its limit, and stops llama-server at $MinHeadroom C, at $TempLimit C, if the charger drops or the GPU stops answering"
 $started = Get-Date
 
 try {
@@ -290,7 +306,7 @@ try {
         if (-not (Start-Server $path 4 $m.Name)) { Say "skipping $($m.Name): server failed to start"; continue }
         $vram = Get-Vram
         Say "server ready, GPU memory in use: $vram MiB"
-        $base = @("judge.label=$($m.Label)", "concurrency=4", "meta.model=$($m.Name)", "meta.model_gb=$sizeGb", "meta.vram_mib=$vram", "meta.parallel=4", "meta.gpu_power_limit_w=$GpuWatts") + @($m.Sets)
+        $base = @("judge.label=$($m.Label)", "concurrency=4", "meta.model=$($m.Name)", "meta.model_gb=$sizeGb", "meta.vram_mib=$vram", "meta.parallel=4", "meta.gpu_power_limit_w=$(Get-GpuWatts)") + @($m.Sets)
 
         foreach ($style in @("hardened", "naive")) {
             foreach ($ref in @("none", "given")) {
@@ -325,6 +341,7 @@ try {
 } finally {
     Stop-Server
     Stop-Guard
+    Remove-Item $PauseFile -ErrorAction SilentlyContinue
 }
 
 Update-Results

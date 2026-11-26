@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
@@ -18,6 +20,54 @@ from .parsing import parse_verdict
 from .prompts import PROMPT_VERSION, build_messages, schema_for
 from .report import write_reports
 from .tasks import load_cases
+
+
+class PauseGate:
+    """Cooperative back-pressure for a judge that shares a machine with a thermal budget.
+
+    While the pause file exists and is fresh, no new judge call starts; calls already
+    in flight finish. Whoever watches the hardware (scripts/gpu_guard.py) creates the
+    file when the GPU is close to its limit and removes it when it has cooled. The
+    file must be refreshed while the pause lasts: a file left behind by a watcher that
+    died is ignored once it is stale_after_s old, so a run can never hang on it.
+    """
+
+    def __init__(self, path: str | Path | None, log=print, stale_after_s: float = 30.0, poll_s: float = 0.25):
+        self.path = Path(path) if path else None
+        self.paused_s = 0.0
+        self.pauses = 0
+        self._log = log
+        self._stale_after_s = stale_after_s
+        self._poll_s = poll_s
+        self._lock = threading.Lock()
+        self._since: float | None = None
+
+    def reason(self) -> str | None:
+        if self.path is None:
+            return None
+        try:
+            if time.time() - self.path.stat().st_mtime > self._stale_after_s:
+                return None
+            return self.path.read_text(encoding="utf-8", errors="replace").strip() or "pause requested"
+        except OSError:
+            return None
+
+    def wait(self) -> None:
+        reason = self.reason()
+        if reason is None:
+            return
+        with self._lock:
+            if self._since is None:
+                self._since = time.perf_counter()
+                self.pauses += 1
+                self._log(f"[judgeaudit] paused: {reason}")
+        while self.reason() is not None:
+            time.sleep(self._poll_s)
+        with self._lock:
+            if self._since is not None:
+                self.paused_s += time.perf_counter() - self._since
+                self._since = None
+                self._log("[judgeaudit] resumed")
 
 
 def _file_hash(path: str | Path) -> str:
@@ -102,6 +152,12 @@ def run_audit(
     errors: dict[str, str] = {}
     fresh: set[str] = set()
     aborted = False
+    gate = PauseGate(os.environ.get("JUDGEAUDIT_PAUSE_FILE"), log=log)
+
+    def call(request: JudgeRequest):
+        gate.wait()
+        return judge.judge(request)
+
     started = time.perf_counter()
     if pending:
         concurrency = int(cfg["concurrency"])
@@ -111,7 +167,7 @@ def run_audit(
         pool = ThreadPoolExecutor(max_workers=concurrency)
         futures = {
             pool.submit(
-                judge.judge,
+                call,
                 JudgeRequest(messages=msgs, mode=case.mode, schema=schema, repeat=rep, case=case),
             ): key
             for key, case, rep, msgs, schema in pending
@@ -150,6 +206,8 @@ def run_audit(
                 "Finished calls are cached; restart the server and run again to resume."
             )
     wall_s = time.perf_counter() - started
+    # Throughput is measured over the time the judge was allowed to work.
+    active_s = max(wall_s - gate.paused_s, 1e-9)
     if cache is not None:
         cache.close()
 
@@ -174,7 +232,9 @@ def run_audit(
         "cached_calls": len(jobs) - len(pending),
         "failed_calls": len(errors),
         "wall_s": round(wall_s, 3),
-        "calls_per_s": round(len(fresh) / wall_s, 3) if fresh and wall_s > 0 else None,
+        "paused_s": round(gate.paused_s, 3),
+        "pauses": gate.pauses,
+        "calls_per_s": round(len(fresh) / active_s, 3) if fresh and wall_s > 0 else None,
         "use_cache": use_cache,
         "aborted": aborted,
         "meta": cfg.get("meta") or {},

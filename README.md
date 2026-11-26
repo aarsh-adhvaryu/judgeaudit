@@ -87,6 +87,16 @@ The script is built to survive an unreliable machine:
   readings survive a hard power-off. If the charger goes offline or the GPU
   passes `-TempLimit` (default 90 C), it stops the server; the script waits
   until it is safe and resumes.
+- The work is paced to the machine's cooling. When the GPU's hottest sensor comes
+  within `-PauseHeadroom` (default 8 C) of its throttle limit, the guard puts a
+  pause file in place and `judgeaudit run` starts no new judge call until the GPU
+  has cooled: the model stays loaded and no call fails. Paused time is reported
+  as `paused_s` and left out of `calls_per_s`. Any watcher can use the same
+  hook by setting `JUDGEAUDIT_PAUSE_FILE`; a pause file that is not refreshed
+  for 30 seconds is ignored.
+- The run also holds while the laptop is in a power mode that lets the GPU draw
+  more than `-MaxGpuWatts` (default 100 W), and stops outright if the GPU hangs
+  or disappears instead of carrying on on the CPU.
 - After a full reboot, run the same command again. Finished audits come from
   the cache and finished speed measurements are skipped (`-RedoBench` repeats them).
 

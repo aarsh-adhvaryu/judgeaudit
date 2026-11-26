@@ -65,6 +65,34 @@ def test_cli_set_and_compare(tmp_path, make_cfg):
     assert rows["injected"]["prompt_style"] == "naive" and rows["clean"]["meta.model_gb"] == "4.92"
 
 
+def test_pause_file_holds_new_calls_and_paused_time_is_not_counted_as_speed(make_cfg, tmp_path, monkeypatch):
+    import threading
+
+    flag = tmp_path / "pause.flag"
+    flag.write_text("GPU hotspot 5 C from its throttle limit", encoding="utf-8")
+    monkeypatch.setenv("JUDGEAUDIT_PAUSE_FILE", str(flag))
+    threading.Timer(0.6, flag.unlink).start()  # the watcher lets go after 0.6 s
+    lines = []
+    summary = run_audit(make_cfg(), judge=MockJudge(knowledge=1.0, noise=0.0), log=lines.append)
+    run = summary["run"]
+    assert run["failed_calls"] == 0 and run["new_calls"] == 440
+    assert run["pauses"] == 1 and 0.3 < run["paused_s"] <= run["wall_s"]
+    assert run["calls_per_s"] > run["new_calls"] / run["wall_s"]   # the pause is not charged to the judge
+    assert any("paused: GPU hotspot" in line for line in lines) and any("resumed" in line for line in lines)
+
+
+def test_a_stale_pause_file_is_ignored(make_cfg, tmp_path, monkeypatch):
+    import os
+
+    flag = tmp_path / "pause.flag"
+    flag.write_text("left behind by a watcher that died", encoding="utf-8")
+    old = time.time() - 120
+    os.utime(flag, (old, old))
+    monkeypatch.setenv("JUDGEAUDIT_PAUSE_FILE", str(flag))
+    run = run_audit(make_cfg(), judge=MockJudge(knowledge=1.0, noise=0.0), log=quiet)["run"]
+    assert run["new_calls"] == 440 and run["pauses"] == 0 and run["paused_s"] == 0
+
+
 class DeadServerJudge(MockJudge):
     """Answers the first N calls, then the server is gone."""
 

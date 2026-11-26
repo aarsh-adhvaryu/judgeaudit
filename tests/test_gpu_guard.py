@@ -14,15 +14,15 @@ _spec.loader.exec_module(gpu_guard)
 Sample = gpu_guard.Sample
 
 
-def gpu(temp, headroom=None):
+def gpu(temp, headroom=None, power_limit=None):
     values = [None] * len(gpu_guard.GPU_FIELDS)
-    values[0], values[5] = temp, headroom
+    values[0], values[5], values[8] = temp, headroom, power_limit
     return tuple(values)
 
 
 def test_parse_gpu_line_handles_numbers_flags_and_missing_values():
-    values = gpu_guard.parse_gpu_line("71, 118.42, 99, 6577, 2400, 18, Not Active, Active")
-    assert values == (71.0, 118.42, 99.0, 6577.0, 2400.0, 18.0, False, True)
+    values = gpu_guard.parse_gpu_line("71, 118.42, 99, 6577, 2400, 18, Not Active, Active, 90.00")
+    assert values == (71.0, 118.42, 99.0, 6577.0, 2400.0, 18.0, False, True, 90.0)
     assert gpu_guard.parse_gpu_line("[N/A], [N/A]") == (None,) * len(gpu_guard.GPU_FIELDS)
 
 
@@ -45,6 +45,22 @@ def test_hotspot_headroom_trips_before_the_temperature_limit():
     assert gpu_guard.unsafe_reason(hot, temp_limit=90) is None
     assert "hotspot" in gpu_guard.unsafe_reason(hot, temp_limit=90, min_headroom=3)
     assert gpu_guard.unsafe_reason(Sample(ac_online=True, gpu=gpu(80.0, headroom=9.0)), 90, min_headroom=3) is None
+
+
+def test_pacer_pauses_near_the_limit_and_resumes_only_after_cooling():
+    pacer = gpu_guard.Pacer(pause_headroom=8, resume_headroom=20)
+    at = lambda headroom: Sample(ac_online=True, gpu=gpu(75.0, headroom=headroom))  # noqa: E731
+    assert pacer.step(at(15)) is None
+    assert "cooling" in pacer.step(at(8))
+    assert pacer.step(at(14)) is not None      # hysteresis: still cooling
+    assert pacer.step(at(20)) is None
+    assert pacer.step(at(12)) is None          # and no pause again until it is really close
+
+
+def test_pacer_refuses_a_power_mode_above_the_allowed_limit():
+    pacer = gpu_guard.Pacer(pause_headroom=8, resume_headroom=20, max_power_limit=100)
+    assert pacer.step(Sample(ac_online=True, gpu=gpu(50.0, headroom=30, power_limit=90.0))) is None
+    assert "Fn+Q" in pacer.step(Sample(ac_online=True, gpu=gpu(50.0, headroom=30, power_limit=140.0)))
 
 
 def test_guard_trips_when_the_gpu_stops_answering():
