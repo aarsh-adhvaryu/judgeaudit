@@ -55,10 +55,36 @@ change `base_url`, `model` and, for hosted APIs, `api_key_env`.
 | `... --split dev` / `--split heldout` | Tune prompts on `dev`, report on `heldout` |
 | `... --limit-items N` | Only the first N base items |
 | `... --gate` | Exit code 1 when a threshold fails, for CI |
+| `... --set KEY=VALUE` | Override any config value, e.g. `--set prompt_style=naive --set judge.temperature=0.7` |
+| `... --no-cache` | Neither read nor write the verdict cache, for speed measurements |
 | `judgeaudit report RUN_DIR [-c CONFIG]` | Rebuild the card, optionally with new thresholds |
+| `judgeaudit compare runs --out results` | Put all finished runs side by side (`comparison.md`, `comparison.csv`) |
 
 Each run writes `report.html`, `report.md`, `summary.json`, `results.jsonl`
 (every verdict) and `config.resolved.yaml`.
+
+## Running every experiment
+
+One script downloads the models, starts and stops `llama-server` for each, runs
+the audits and the speed measurements, and writes `results/comparison.md`:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\run_all.ps1
+```
+
+It is safe to stop and run again: finished judge calls come from the cache and
+partial downloads resume. `-Only llama31-8b-q4,llama31-8b-q8` limits it to some
+models, `-SkipBench` leaves out the speed measurements.
+
+| Runs | Question |
+|---|---|
+| `<model>--hardened-none`, `--naive-none` | Does a hardened prompt reduce the biases? |
+| `<model>--hardened-given`, `--naive-given` | Does showing a reference answer fix them? |
+| `llama31-8b-q4` vs `llama31-8b-q8` (and the Qwen pair) | Does quantization change the biases, and at what VRAM and speed? |
+| `llama32-3b-q4` vs `llama31-8b-q4` | Does model size? |
+| `--greedy-x3` vs `--temp07-x3` | Does the decoding strategy change verdict stability? |
+| `bench-prefix-cache-on` vs `-off` | What does KV prefix reuse save? |
+| `bench-parallel-1/2/4/8` | Where does batching stop scaling? |
 
 ## What is measured
 

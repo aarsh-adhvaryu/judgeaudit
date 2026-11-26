@@ -75,7 +75,8 @@ def _perf_lines(summary: dict) -> list[tuple[str, str]]:
         ("Judge calls this run", f"{run['new_calls']} new, {run['cached_calls']} from cache, {run['failed_calls']} failed"),
     ]
     if run.get("calls_per_s"):
-        lines.append(("Throughput (new calls)", f"{run['calls_per_s']:.2f} verdicts/s at concurrency {run['concurrency']}"))
+        label = "Throughput (measured in an earlier run)" if run.get("throughput_from_earlier_run") else "Throughput (new calls)"
+        lines.append((label, f"{run['calls_per_s']:.2f} verdicts/s at concurrency {run['concurrency']}"))
     if "latency_mean_s" in perf:
         lines.append(
             ("Latency per verdict", f"mean {perf['latency_mean_s'] * 1000:.0f} ms, p50 {perf['latency_p50_s'] * 1000:.0f} ms, p95 {perf['latency_p95_s'] * 1000:.0f} ms")

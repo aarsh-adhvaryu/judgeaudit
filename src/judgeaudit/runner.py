@@ -24,6 +24,13 @@ def _file_hash(path: str | Path) -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()[:16]
 
 
+def _previous_run(out_dir: Path) -> dict:
+    try:
+        return json.loads((out_dir / "summary.json").read_text(encoding="utf-8")).get("run", {})
+    except (OSError, ValueError):
+        return {}
+
+
 def _row(case, repeat: int, payload: dict | None, cached: bool, error: str | None) -> dict:
     row = asdict(case)
     row.update(repeat=repeat, cached=cached, error=error)
@@ -51,6 +58,7 @@ def run_audit(
     split: str = "all",
     dry_run: bool = False,
     limit_items: int | None = None,
+    use_cache: bool = True,
     judge=None,
     log=print,
 ) -> dict:
@@ -66,7 +74,8 @@ def run_audit(
     judge = judge or build_judge(cfg["judge"])
     fingerprint = dict(judge.fingerprint(), prompt_version=PROMPT_VERSION)
     style = cfg["prompt_style"]
-    cache = VerdictCache(cfg["cache"])
+    # use_cache=False is for speed measurements: every call really hits the judge.
+    cache = VerdictCache(cfg["cache"]) if use_cache else None
 
     jobs = []
     for case in cases:
@@ -76,7 +85,7 @@ def run_audit(
             key = make_key(fingerprint, messages, schema, repeat)
             jobs.append((key, case, repeat, messages, schema))
 
-    payloads = {key: cache.get(key) for key, *_ in jobs}
+    payloads = {key: (cache.get(key) if cache is not None else None) for key, *_ in jobs}
     pending = [job for job in jobs if payloads[job[0]] is None]
     n_items = len({case.item_id for case in cases})
     prompt_chars = sum(len(m["content"]) for _, _, _, msgs, _ in pending for m in msgs)
@@ -86,7 +95,8 @@ def run_audit(
         f"(~{prompt_chars // 4:,} prompt tokens)"
     )
     if dry_run:
-        cache.close()
+        if cache is not None:
+            cache.close()
         return {"dry_run": True, "n_calls": len(jobs), "n_pending": len(pending)}
 
     errors: dict[str, str] = {}
@@ -109,13 +119,15 @@ def run_audit(
                     errors[key] = str(exc)
                 else:
                     payload = asdict(response)
-                    cache.put(key, payload)  # written as each call lands, so a crash loses nothing
+                    if cache is not None:
+                        cache.put(key, payload)  # written as each call lands, so a crash loses nothing
                     payloads[key] = payload
                     fresh.add(key)
                 if done % 50 == 0 or done == len(pending):
                     log(f"[judgeaudit] {done}/{len(pending)} calls done")
     wall_s = time.perf_counter() - started
-    cache.close()
+    if cache is not None:
+        cache.close()
 
     rows = [
         _row(case, repeat, payloads[key], cached=key not in fresh, error=errors.get(key))
@@ -139,10 +151,22 @@ def run_audit(
         "failed_calls": len(errors),
         "wall_s": round(wall_s, 3),
         "calls_per_s": round(len(fresh) / wall_s, 3) if fresh and wall_s > 0 else None,
+        "use_cache": use_cache,
+        "meta": cfg.get("meta") or {},
     }
+    out_dir = Path(cfg["out_dir"]) / cfg["run_name"]
+    if not fresh:
+        # A fully cached re-run measures no speed: keep the figure from the run that did.
+        previous = _previous_run(out_dir)
+        if (
+            previous.get("calls_per_s")
+            and previous.get("judge") == fingerprint
+            and previous.get("concurrency") == run_info["concurrency"]
+        ):
+            run_info["calls_per_s"] = previous["calls_per_s"]
+            run_info["throughput_from_earlier_run"] = True
     summary = compute_summary(rows, cfg["thresholds"], run_info, seed=int(cfg["bootstrap_seed"]))
 
-    out_dir = Path(cfg["out_dir"]) / cfg["run_name"]
     out_dir.mkdir(parents=True, exist_ok=True)
     with open(out_dir / "results.jsonl", "w", encoding="utf-8") as handle:
         for row in rows:

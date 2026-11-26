@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from . import __version__
+from .compare import write_comparison
 from .config import load_config
 from .judges import JudgeError
 from .metrics import compute_summary
@@ -14,12 +15,18 @@ from .runner import run_audit
 
 
 def _cmd_run(args) -> int:
-    cfg = load_config(args.config)
+    cfg = load_config(args.config, args.set)
     if args.run_name:
         cfg["run_name"] = args.run_name
     if args.cache:
         cfg["cache"] = args.cache
-    summary = run_audit(cfg, split=args.split, dry_run=args.dry_run, limit_items=args.limit_items)
+    summary = run_audit(
+        cfg,
+        split=args.split,
+        dry_run=args.dry_run,
+        limit_items=args.limit_items,
+        use_cache=not args.no_cache,
+    )
     if summary.get("dry_run"):
         return 0
     return 1 if args.gate and not summary["passed"] else 0
@@ -40,6 +47,12 @@ def _cmd_report(args) -> int:
     return 1 if args.gate and not summary["passed"] else 0
 
 
+def _cmd_compare(args) -> int:
+    n = write_comparison(args.runs_dir, args.out, include_mock=args.include_mock)
+    print(f"[judgeaudit] compared {n} runs: {Path(args.out) / 'comparison.md'}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="judgeaudit",
@@ -57,7 +70,17 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--run-name", help="override run_name from the config")
     run.add_argument("--cache", help="override the cache path from the config")
     run.add_argument("--gate", action="store_true", help="exit 1 when a threshold fails (for CI)")
+    run.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
+                     help="override a config value, e.g. --set prompt_style=naive --set judge.temperature=0.7")
+    run.add_argument("--no-cache", action="store_true",
+                     help="neither read nor write the verdict cache (for speed measurements)")
     run.set_defaults(func=_cmd_run)
+
+    compare = sub.add_parser("compare", help="put several finished runs side by side")
+    compare.add_argument("runs_dir", nargs="?", default="runs")
+    compare.add_argument("--out", default="results", help="folder for comparison.md and comparison.csv")
+    compare.add_argument("--include-mock", action="store_true")
+    compare.set_defaults(func=_cmd_compare)
 
     report = sub.add_parser("report", help="rebuild the card from a finished run, optionally with new thresholds")
     report.add_argument("run_dir")

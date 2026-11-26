@@ -16,15 +16,33 @@ DEFAULTS = {
     "out_dir": "runs",
     "bootstrap_seed": 0,
     "thresholds": {},
+    "meta": {},  # free-form notes recorded with the run (model size, VRAM, ...); never part of the cache key
 }
 
 
-def load_config(path: str | Path) -> dict:
+def load_config(path: str | Path, overrides: list[str] | None = None) -> dict:
     with open(path, encoding="utf-8") as handle:
         raw = yaml.safe_load(handle) or {}
     if not isinstance(raw, dict):
         raise ValueError(f"{path}: config must be a mapping")
-    return normalise(raw)
+    return normalise(apply_overrides(raw, overrides or []))
+
+
+def apply_overrides(raw: dict, pairs: list[str]) -> dict:
+    """Apply `key.path=value` overrides, e.g. judge.temperature=0.7. Values are parsed as YAML."""
+    cfg = copy.deepcopy(raw)
+    for pair in pairs or []:
+        key, sep, text = pair.partition("=")
+        if not sep or not key:
+            raise ValueError(f"--set expects key=value, got {pair!r}")
+        node = cfg
+        parts = key.split(".")
+        for part in parts[:-1]:
+            if not isinstance(node.get(part), dict):
+                node[part] = {}
+            node = node[part]
+        node[parts[-1]] = yaml.safe_load(text)
+    return cfg
 
 
 def normalise(raw: dict) -> dict:
@@ -38,4 +56,5 @@ def normalise(raw: dict) -> dict:
     if int(cfg["repeats"]) < 1 or int(cfg["concurrency"]) < 1:
         raise ValueError("repeats and concurrency must be at least 1")
     cfg["thresholds"] = cfg.get("thresholds") or {}
+    cfg["meta"] = cfg.get("meta") or {}
     return cfg
