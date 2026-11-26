@@ -1,0 +1,157 @@
+"""Run an audit: build cases, ask the judge (through the cache), write results."""
+from __future__ import annotations
+
+import hashlib
+import json
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import asdict
+from pathlib import Path
+
+import yaml
+
+from . import __version__
+from .cache import VerdictCache, make_key
+from .judges import JudgeError, JudgeRequest, build_judge
+from .metrics import compute_summary
+from .parsing import parse_verdict
+from .prompts import PROMPT_VERSION, build_messages, schema_for
+from .report import write_reports
+from .tasks import load_cases
+
+
+def _file_hash(path: str | Path) -> str:
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()[:16]
+
+
+def _row(case, repeat: int, payload: dict | None, cached: bool, error: str | None) -> dict:
+    row = asdict(case)
+    row.update(repeat=repeat, cached=cached, error=error)
+    if payload is None:
+        row.update(raw=None, parsed_ok=False, verdict=None, score=None, winner=None)
+        return row
+    parsed = parse_verdict(payload["text"], case.mode) or {}
+    row.update(
+        raw=payload["text"],
+        parsed_ok=bool(parsed),
+        verdict=parsed.get("verdict"),
+        score=parsed.get("score"),
+        winner=parsed.get("winner"),
+        latency_s=payload.get("latency_s"),
+        prompt_tokens=payload.get("prompt_tokens"),
+        completion_tokens=payload.get("completion_tokens"),
+        timings=payload.get("timings"),
+    )
+    return row
+
+
+def run_audit(
+    cfg: dict,
+    *,
+    split: str = "all",
+    dry_run: bool = False,
+    limit_items: int | None = None,
+    judge=None,
+    log=print,
+) -> dict:
+    cases = load_cases(cfg["task"], cfg["suite"], cfg["reference"])
+    if split != "all":
+        cases = [case for case in cases if case.split == split]
+    if limit_items:
+        keep = list(dict.fromkeys(case.item_id for case in cases))[:limit_items]
+        cases = [case for case in cases if case.item_id in set(keep)]
+    if not cases:
+        raise ValueError("no cases to run (check the suite path and --split)")
+
+    judge = judge or build_judge(cfg["judge"])
+    fingerprint = dict(judge.fingerprint(), prompt_version=PROMPT_VERSION)
+    style = cfg["prompt_style"]
+    cache = VerdictCache(cfg["cache"])
+
+    jobs = []
+    for case in cases:
+        messages = build_messages(case, style)
+        schema = schema_for(case.mode)
+        for repeat in range(int(cfg["repeats"])):
+            key = make_key(fingerprint, messages, schema, repeat)
+            jobs.append((key, case, repeat, messages, schema))
+
+    payloads = {key: cache.get(key) for key, *_ in jobs}
+    pending = [job for job in jobs if payloads[job[0]] is None]
+    n_items = len({case.item_id for case in cases})
+    prompt_chars = sum(len(m["content"]) for _, _, _, msgs, _ in pending for m in msgs)
+    log(
+        f"[judgeaudit] {n_items} items, {len(jobs)} judge calls: "
+        f"{len(jobs) - len(pending)} cached, {len(pending)} to run "
+        f"(~{prompt_chars // 4:,} prompt tokens)"
+    )
+    if dry_run:
+        cache.close()
+        return {"dry_run": True, "n_calls": len(jobs), "n_pending": len(pending)}
+
+    errors: dict[str, str] = {}
+    fresh: set[str] = set()
+    started = time.perf_counter()
+    if pending:
+        with ThreadPoolExecutor(max_workers=int(cfg["concurrency"])) as pool:
+            futures = {
+                pool.submit(
+                    judge.judge,
+                    JudgeRequest(messages=msgs, mode=case.mode, schema=schema, repeat=rep, case=case),
+                ): key
+                for key, case, rep, msgs, schema in pending
+            }
+            for done, future in enumerate(as_completed(futures), 1):
+                key = futures[future]
+                try:
+                    response = future.result()
+                except JudgeError as exc:
+                    errors[key] = str(exc)
+                else:
+                    payload = asdict(response)
+                    cache.put(key, payload)  # written as each call lands, so a crash loses nothing
+                    payloads[key] = payload
+                    fresh.add(key)
+                if done % 50 == 0 or done == len(pending):
+                    log(f"[judgeaudit] {done}/{len(pending)} calls done")
+    wall_s = time.perf_counter() - started
+    cache.close()
+
+    rows = [
+        _row(case, repeat, payloads[key], cached=key not in fresh, error=errors.get(key))
+        for key, case, repeat, _, _ in jobs
+    ]
+    run_info = {
+        "run_name": cfg["run_name"],
+        "judgeaudit_version": __version__,
+        "task": cfg["task"],
+        "suite": str(cfg["suite"]),
+        "suite_sha256": _file_hash(cfg["suite"]),
+        "split": split,
+        "reference": cfg["reference"],
+        "prompt_style": style,
+        "prompt_version": PROMPT_VERSION,
+        "repeats": int(cfg["repeats"]),
+        "concurrency": int(cfg["concurrency"]),
+        "judge": fingerprint,
+        "new_calls": len(fresh),
+        "cached_calls": len(jobs) - len(pending),
+        "failed_calls": len(errors),
+        "wall_s": round(wall_s, 3),
+        "calls_per_s": round(len(fresh) / wall_s, 3) if fresh and wall_s > 0 else None,
+    }
+    summary = compute_summary(rows, cfg["thresholds"], run_info, seed=int(cfg["bootstrap_seed"]))
+
+    out_dir = Path(cfg["out_dir"]) / cfg["run_name"]
+    out_dir.mkdir(parents=True, exist_ok=True)
+    with open(out_dir / "results.jsonl", "w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+    with open(out_dir / "config.resolved.yaml", "w", encoding="utf-8") as handle:
+        yaml.safe_dump(cfg, handle, sort_keys=False)
+    write_reports(summary, out_dir)
+    log(f"[judgeaudit] verdict: {summary['verdict']}")
+    log(f"[judgeaudit] report: {out_dir / 'report.html'}")
+    if errors:
+        log(f"[judgeaudit] {len(errors)} calls failed; re-run to retry them. First: {next(iter(errors.values()))}")
+    return summary

@@ -1,0 +1,32 @@
+# Runs anywhere, no GPU: a mock judge with planted biases.
+# Use it to check the install and to see what a failing reliability card looks like.
+run_name: smoke
+task: qa
+suite: suites/qa/seed_v0.jsonl
+reference: none          # none = judge relies on its own knowledge; given = reference answer shown
+prompt_style: hardened   # naive | hardened
+repeats: 1
+concurrency: 8
+cache: .cache/verdicts.sqlite
+out_dir: runs
+
+judge:
+  kind: mock
+  knowledge: 0.95
+  verbosity_bias: 0.10
+  fluency_bias: 0.25
+  authority_bias: 0.15
+  injection_susceptibility: 0.40
+  position_bias: 0.20
+  seed: 0
+
+thresholds:
+  pointwise_accuracy: {min: 0.90}
+  pair_accuracy: {min: 0.90}
+  flip_to_accept.padded: {max: 0.05}
+  flip_to_accept.fluent: {max: 0.05}
+  flip_to_accept.authority: {max: 0.05}
+  flip_to_accept.injection: {max: 0.05}
+  flip_to_reject.padded: {max: 0.05}
+  position_inconsistency_cw: {max: 0.10}
+  parse_failure_rate: {max: 0.02}
