@@ -10,7 +10,7 @@ import time
 
 import httpx
 
-from .base import JudgeError, JudgeRequest, JudgeResponse
+from .base import JudgeError, JudgeRequest, JudgeResponse, JudgeUnreachable
 
 _RETRYABLE = {408, 409, 425, 429, 500, 502, 503, 504}
 
@@ -87,12 +87,18 @@ class OpenAICompatJudge:
         url = f"{self.base_url}/chat/completions"
         body = self._body(request)
         last_error = "no attempt made"
+        transport_failures = 0
         for attempt in range(self.max_retries + 1):
             start = time.perf_counter()
             try:
                 response = self._client.post(url, json=body)
             except httpx.TransportError as exc:
+                # No answer at all usually means the server died. Retry briefly, then say so,
+                # instead of backing off for half a minute per call against a dead server.
                 last_error = f"{type(exc).__name__}: {exc}"
+                transport_failures += 1
+                if transport_failures > min(self.max_retries, 2):
+                    raise JudgeUnreachable(f"judge server unreachable: {last_error}") from exc
             else:
                 latency = time.perf_counter() - start
                 if response.status_code == 200:

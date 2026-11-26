@@ -1,4 +1,5 @@
 import csv
+import time
 
 import pytest
 import yaml
@@ -62,3 +63,47 @@ def test_cli_set_and_compare(tmp_path, make_cfg):
     assert float(rows["injected"]["flip_to_accept.injection"]) == 1.0
     assert float(rows["clean"]["flip_to_accept.injection"]) == 0.0
     assert rows["injected"]["prompt_style"] == "naive" and rows["clean"]["meta.model_gb"] == "4.92"
+
+
+class DeadServerJudge(MockJudge):
+    """Answers the first N calls, then the server is gone."""
+
+    def __init__(self, alive_for, **kwargs):
+        super().__init__(**kwargs)
+        self.alive_for = alive_for
+        self.dead = True
+
+    def judge(self, request):
+        from judgeaudit.judges import JudgeUnreachable
+
+        if self.dead and self.calls >= self.alive_for:
+            self.calls += 1
+            time.sleep(0.02)  # a refused connection is not instant either
+            raise JudgeUnreachable("judge server unreachable: ConnectError")
+        return super().judge(request)
+
+
+def test_a_dead_server_stops_the_run_early_and_the_next_run_resumes(make_cfg):
+    cfg = make_cfg()
+    judge = DeadServerJudge(alive_for=100, knowledge=1.0, noise=0.0)
+    first = run_audit(cfg, judge=judge, log=quiet)
+    assert first["run"]["aborted"] is True
+    assert judge.calls < 300  # the breaker stopped it well short of all 440 calls
+    assert first["run"]["new_calls"] >= 90
+    assert first["run"]["new_calls"] + first["run"]["failed_calls"] == 440
+    assert first["verdict"].startswith("INCOMPLETE") or "run incomplete" in first["verdict"]
+    assert first["passed"] is False
+
+    judge.dead = False  # server restarted
+    second = run_audit(cfg, judge=judge, log=quiet)
+    assert second["run"]["aborted"] is False and second["run"]["failed_calls"] == 0
+    assert second["run"]["cached_calls"] == first["run"]["new_calls"]
+    assert second["passed"] and second["n_rows"] == 440
+
+
+def test_cli_exit_code_3_when_the_server_is_unreachable(tmp_path, make_cfg):
+    cfg = make_cfg()
+    cfg["judge"] = {"kind": "openai_compat", "base_url": "http://127.0.0.1:9/v1", "max_retries": 0, "timeout_s": 2}
+    path = tmp_path / "cfg.yaml"
+    path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    assert main(["run", "-c", str(path), "--limit-items", "3"]) == 3

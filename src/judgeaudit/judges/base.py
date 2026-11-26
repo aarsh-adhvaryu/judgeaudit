@@ -11,6 +11,10 @@ class JudgeError(RuntimeError):
     """The judge could not produce a response (after retries)."""
 
 
+class JudgeUnreachable(JudgeError):
+    """The judge's server did not answer at all: it is down, not merely erroring."""
+
+
 @dataclass
 class JudgeRequest:
     messages: list[dict]

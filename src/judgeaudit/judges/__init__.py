@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .base import Judge, JudgeError, JudgeRequest, JudgeResponse
+from .base import Judge, JudgeError, JudgeRequest, JudgeResponse, JudgeUnreachable
 from .mock import MockJudge
 from .openai_compat import OpenAICompatJudge
 
@@ -20,6 +20,7 @@ __all__ = [
     "JudgeError",
     "JudgeRequest",
     "JudgeResponse",
+    "JudgeUnreachable",
     "MockJudge",
     "OpenAICompatJudge",
     "build_judge",

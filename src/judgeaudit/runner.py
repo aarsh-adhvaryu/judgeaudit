@@ -12,7 +12,7 @@ import yaml
 
 from . import __version__
 from .cache import VerdictCache, make_key
-from .judges import JudgeError, JudgeRequest, build_judge
+from .judges import JudgeError, JudgeRequest, JudgeUnreachable, build_judge
 from .metrics import compute_summary
 from .parsing import parse_verdict
 from .prompts import PROMPT_VERSION, build_messages, schema_for
@@ -101,23 +101,37 @@ def run_audit(
 
     errors: dict[str, str] = {}
     fresh: set[str] = set()
+    aborted = False
     started = time.perf_counter()
     if pending:
-        with ThreadPoolExecutor(max_workers=int(cfg["concurrency"])) as pool:
-            futures = {
-                pool.submit(
-                    judge.judge,
-                    JudgeRequest(messages=msgs, mode=case.mode, schema=schema, repeat=rep, case=case),
-                ): key
-                for key, case, rep, msgs, schema in pending
-            }
+        concurrency = int(cfg["concurrency"])
+        # Circuit breaker: this many unreachable calls in a row means the server is gone.
+        breaker = max(4, 2 * concurrency)
+        unreachable_streak = 0
+        pool = ThreadPoolExecutor(max_workers=concurrency)
+        futures = {
+            pool.submit(
+                judge.judge,
+                JudgeRequest(messages=msgs, mode=case.mode, schema=schema, repeat=rep, case=case),
+            ): key
+            for key, case, rep, msgs, schema in pending
+        }
+        try:
             for done, future in enumerate(as_completed(futures), 1):
                 key = futures[future]
                 try:
                     response = future.result()
+                except JudgeUnreachable as exc:
+                    errors[key] = str(exc)
+                    unreachable_streak += 1
+                    if unreachable_streak >= breaker:
+                        aborted = True
+                        break
                 except JudgeError as exc:
                     errors[key] = str(exc)
+                    unreachable_streak = 0
                 else:
+                    unreachable_streak = 0
                     payload = asdict(response)
                     if cache is not None:
                         cache.put(key, payload)  # written as each call lands, so a crash loses nothing
@@ -125,6 +139,16 @@ def run_audit(
                     fresh.add(key)
                 if done % 50 == 0 or done == len(pending):
                     log(f"[judgeaudit] {done}/{len(pending)} calls done")
+        finally:
+            pool.shutdown(wait=True, cancel_futures=aborted)
+        if aborted:
+            for key in futures.values():
+                if payloads[key] is None and key not in errors:
+                    errors[key] = "not run: the judge server became unreachable and the run was stopped"
+            log(
+                f"[judgeaudit] judge server unreachable: stopped after {len(fresh)} of {len(pending)} calls. "
+                "Finished calls are cached; restart the server and run again to resume."
+            )
     wall_s = time.perf_counter() - started
     if cache is not None:
         cache.close()
@@ -152,6 +176,7 @@ def run_audit(
         "wall_s": round(wall_s, 3),
         "calls_per_s": round(len(fresh) / wall_s, 3) if fresh and wall_s > 0 else None,
         "use_cache": use_cache,
+        "aborted": aborted,
         "meta": cfg.get("meta") or {},
     }
     out_dir = Path(cfg["out_dir"]) / cfg["run_name"]

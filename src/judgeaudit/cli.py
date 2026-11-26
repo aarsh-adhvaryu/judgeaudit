@@ -29,6 +29,8 @@ def _cmd_run(args) -> int:
     )
     if summary.get("dry_run"):
         return 0
+    if summary["run"].get("aborted"):
+        return 3  # judge server went away mid-run; safe to restart it and run again
     return 1 if args.gate and not summary["passed"] else 0
 
 
