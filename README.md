@@ -16,7 +16,7 @@ any change in the verdict is bias by construction.
 python -m venv .venv
 .venv\Scripts\Activate.ps1
 pip install -e ".[dev]"
-pytest -q                                  # 29 tests, no GPU needed
+pytest -q                                  # no GPU needed
 judgeaudit run -c configs/smoke.yaml       # mock judge with planted biases
 start runs\smoke\report.html
 ```
@@ -75,6 +75,20 @@ powershell -ExecutionPolicy Bypass -File scripts\run_all.ps1
 It is safe to stop and run again: finished judge calls come from the cache and
 partial downloads resume. `-Only llama31-8b-q4,llama31-8b-q8` limits it to some
 models, `-SkipBench` leaves out the speed measurements.
+
+The script is built to survive an unreliable machine:
+
+- If `llama-server` dies mid-audit, `judgeaudit run` exits with code 3 within
+  seconds, and the script records the GPU state and related Windows events in
+  `logs/crashes.log`, restarts the server and resumes from the cache.
+- `scripts/gpu_guard.py` runs alongside. Once a second it appends charger state,
+  battery level and GPU temperature, power and throttle flags to
+  `logs/telemetry-<start>.csv`, flushed to disk on every row so the last
+  readings survive a hard power-off. If the charger goes offline or the GPU
+  passes `-TempLimit` (default 90 C), it stops the server; the script waits
+  until it is safe and resumes.
+- After a full reboot, run the same command again. Finished audits come from
+  the cache and finished speed measurements are skipped (`-RedoBench` repeats them).
 
 | Runs | Question |
 |---|---|

@@ -8,7 +8,14 @@ Runs the whole experiment set unattended, one model after another:
 
 If llama-server dies in the middle of an audit, the script records the evidence in
 logs\crashes.log, restarts the server and resumes: finished judge calls come from
-the cache. Safe to stop with Ctrl+C and run again.
+the cache. Safe to stop with Ctrl+C and run again, also after the whole machine
+went down: finished audits come from the cache and finished speed measurements
+are skipped (-RedoBench measures them again).
+
+scripts\gpu_guard.py runs alongside: it logs charger state and GPU temperature and
+power once a second to logs\telemetry-<start>.csv, and stops llama-server when the
+charger goes offline or the GPU passes -TempLimit. The script then waits until it
+is safe and resumes. Everything printed here is also kept in logs\run_all-<start>.log.
 
   powershell -ExecutionPolicy Bypass -File scripts\run_all.ps1
   powershell -ExecutionPolicy Bypass -File scripts\run_all.ps1 -Only llama31-8b-q4
@@ -17,7 +24,9 @@ param(
     [string]$LlamaServer = "D:\llama.cpp\llama-server.exe",
     [int]$Port = 8080,
     [string[]]$Only = @(),
-    [switch]$SkipBench
+    [switch]$SkipBench,
+    [switch]$RedoBench,
+    [int]$TempLimit = 90
 )
 
 $Root = Split-Path -Parent $PSScriptRoot
@@ -26,6 +35,9 @@ $Py = Join-Path $Root ".venv\Scripts\python.exe"
 $ModelsDir = Join-Path $Root "models"
 $LogDir = Join-Path $Root "logs"
 $CrashLog = Join-Path $LogDir "crashes.log"
+$Guard = Join-Path $Root "scripts\gpu_guard.py"
+$RunStamp = Get-Date -Format "yyyyMMdd-HHmmss"
+$Telemetry = Join-Path $LogDir "telemetry-$RunStamp.csv"
 $Config = "configs\local_llamacpp.yaml"
 $env:PYTHONUNBUFFERED = "1"
 $Only = @($Only | ForEach-Object { $_ -split "," } | Where-Object { $_ })
@@ -34,6 +46,7 @@ $script:Crashes = 0
 if (-not (Test-Path $Py)) { Write-Host "[run_all] .venv not found. Run: python -m venv .venv; .venv\Scripts\pip install -e .[dev]"; exit 1 }
 if (-not (Test-Path $LlamaServer)) { Write-Host "[run_all] llama-server not found at $LlamaServer (pass -LlamaServer <path>)"; exit 1 }
 New-Item -ItemType Directory -Force $ModelsDir, $LogDir, (Join-Path $Root "results") | Out-Null
+try { Start-Transcript -Path (Join-Path $LogDir "run_all-$RunStamp.log") | Out-Null } catch { }
 
 $HF = "https://huggingface.co"
 $Models = @(
@@ -84,21 +97,64 @@ function Get-GpuLine {
 }
 
 function Save-Evidence([string]$what, [int]$minutes) {
-    # Writes what happened, the GPU state and any graphics-driver or hardware events
-    # Windows logged in the last few minutes. Returns the number of such events.
+    # Writes what happened, the GPU state and any graphics-driver, charger or
+    # unexpected-shutdown events Windows logged in the last few minutes. Returns their number.
     $stamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     Add-Content -Path $CrashLog -Value "$stamp  $what  | GPU temp/power/memory/util: $(Get-GpuLine)"
     $count = 0
     try {
         $events = Get-WinEvent -FilterHashtable @{ LogName = "System"; StartTime = (Get-Date).AddMinutes(-$minutes) } -ErrorAction Stop |
-            Where-Object { $_.ProviderName -match "nvlddmkm|Display|WHEA|Kernel-Power|Kernel-Processor-Power" }
+            Where-Object {
+                ($_.ProviderName -match "nvlddmkm|WHEA|WER-SystemErrorReporting|dxgkrnl|^Display$") -or
+                ($_.ProviderName -eq "Microsoft-Windows-Kernel-Power" -and ($_.Id -eq 41 -or $_.Id -eq 105)) -or
+                ($_.ProviderName -eq "EventLog" -and $_.Id -eq 6008)
+            } | Sort-Object TimeCreated
         foreach ($e in $events) {
             $first = ("" + $e.Message -split "`n")[0].Trim()
+            # nvlddmkm has no message text and "power source change" does not say which way: use the raw values.
+            if (-not $first -or $e.Id -eq 105) { $first = ("$first " + (($e.Properties | ForEach-Object { "$($_.Value)" }) -join " ")).Trim() }
+            if ($first.Length -gt 200) { $first = $first.Substring(0, 200) }
             Add-Content -Path $CrashLog -Value ("    windows event {0}  {1}  id {2}  {3}" -f $e.TimeCreated.ToString("HH:mm:ss"), $e.ProviderName, $e.Id, $first)
             $count++
         }
     } catch { }
     return $count
+}
+
+function Stop-Guard {
+    # The venv launcher and the interpreter it starts both carry this command line.
+    Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -like "*gpu_guard.py*watch*" } |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+}
+
+function Start-Guard {
+    Stop-Guard
+    $argList = @("`"$Guard`"", "watch", "--csv", "`"$Telemetry`"", "--trip-log", "`"$CrashLog`"", "--temp-limit", "$TempLimit", "--parent-pid", "$PID")
+    Start-Process -FilePath $Py -ArgumentList $argList -NoNewWindow | Out-Null
+}
+
+function Wait-Safe {
+    # Blocks while the charger is offline or the GPU is still hot. Gives up after 30 minutes.
+    $resumeBelow = $TempLimit - 15
+    for ($i = 0; $i -lt 180; $i++) {
+        $why = & $Py $Guard check --temp-limit $resumeBelow
+        if ($LASTEXITCODE -eq 0) { return }
+        if ($i % 6 -eq 0) { Say "not loading the GPU yet: $why" }
+        Start-Sleep -Seconds 10
+    }
+    throw "still not safe to load the GPU after 30 minutes ($why)"
+}
+
+function Test-RunComplete([string]$runName) {
+    $file = Join-Path $Root "runs\$runName\summary.json"
+    if (-not (Test-Path $file)) { return $false }
+    try {
+        $run = (Get-Content $file -Raw | ConvertFrom-Json).run
+        return ($run.new_calls -gt 0 -and $run.failed_calls -eq 0 -and -not $run.aborted)
+    } catch {
+        return $false
+    }
 }
 
 function Get-Model($m) {
@@ -126,6 +182,7 @@ function Get-Model($m) {
 
 function Start-Server([string]$path, [int]$parallel, [string]$tag) {
     Stop-Server
+    Wait-Safe
     $ctx = 1024 * $parallel
     $log = Join-Path $LogDir ("server-{0}-{1}.log" -f $tag, (Get-Date -Format "HHmmss"))
     $argList = @("-m", "`"$path`"", "-ngl", "99", "-c", "$ctx", "--parallel", "$parallel", "--port", "$Port")
@@ -145,6 +202,11 @@ function Invoke-Audit([string]$runName, [string[]]$sets, [string[]]$more, [strin
     $cmd = @("-m", "judgeaudit", "run", "-c", $Config, "--run-name", $runName)
     foreach ($s in $sets) { if ($s) { $cmd += @("--set", $s) } }
     if ($more) { $cmd += $more }
+    # Speed measurements bypass the verdict cache, so skip the ones that already finished cleanly.
+    if (($more -contains "--no-cache") -and -not $RedoBench -and (Test-RunComplete $runName)) {
+        Say "skip $runName, already measured (-RedoBench measures it again)"
+        return
+    }
     for ($attempt = 1; $attempt -le 4; $attempt++) {
         if (-not (Test-Server)) {
             if (-not (Start-Server $path $parallel $tag)) { Say "cannot start the server, skipping $runName"; return }
@@ -185,10 +247,12 @@ if (Test-Path $old) {
 $drive = (Split-Path -Qualifier $Root).TrimEnd(":")
 $freeGb = [math]::Round((Get-PSDrive -Name $drive).Free / 1GB, 1)
 Say "free space on ${drive}: $freeGb GB (the four extra models need about 25 GB)"
-$history = Save-Evidence "run_all started (looking back 4 hours for graphics-driver events)" 240
-Say "Windows logged $history graphics-driver or hardware events in the last 4 hours (details in logs\crashes.log)"
+$history = Save-Evidence "run_all started (looking back 4 hours)" 240
+Say "Windows logged $history graphics-driver, charger or unexpected-shutdown events in the last 4 hours (details in logs\crashes.log)"
 if (Get-Process -Name "llama-server" -ErrorAction SilentlyContinue) { Say "stopping the llama-server that is already running" }
 Stop-Server
+Start-Guard
+Say "gpu_guard is logging to $Telemetry and stops llama-server if the charger drops or the GPU reaches $TempLimit C"
 $started = Get-Date
 
 try {
@@ -222,6 +286,7 @@ try {
             # Batching: server slots and client concurrency swept together.
             foreach ($p in @(1, 2, 4, 8)) {
                 $tag = "$($m.Name)-p$p"
+                if (-not $RedoBench -and (Test-RunComplete "bench-parallel-$p")) { Say "skip bench-parallel-$p, already measured (-RedoBench measures it again)"; continue }
                 if (-not (Start-Server $path $p $tag)) { continue }
                 $v = Get-Vram
                 Invoke-Audit "bench-parallel-$p" ($base + @("concurrency=$p", "meta.parallel=$p", "meta.vram_mib=$v")) @("--no-cache") $path $p $tag
@@ -231,11 +296,15 @@ try {
         Stop-Server
         Update-Results
     }
+} catch {
+    Say "stopped early: $_"
 } finally {
     Stop-Server
+    Stop-Guard
 }
 
 Update-Results
 $minutes = [math]::Round(((Get-Date) - $started).TotalMinutes, 1)
 Say "finished in $minutes minutes; llama-server died and was restarted $($script:Crashes) times"
 Say "open results\comparison.md, then commit: git add -A; git commit -m `"Experiment results`"; git push"
+try { Stop-Transcript | Out-Null } catch { }
