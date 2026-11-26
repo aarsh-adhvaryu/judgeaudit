@@ -29,6 +29,10 @@ PowerShell and a driver that allows it; the script reports whether it took effec
 
   powershell -ExecutionPolicy Bypass -File scripts\run_all.ps1
   powershell -ExecutionPolicy Bypass -File scripts\run_all.ps1 -Only llama31-8b-q4
+  powershell -ExecutionPolicy Bypass -File scripts\run_all.ps1 -DownloadOnly
+
+-DownloadOnly fetches every missing model file and stops: no server, no GPU load.
+A download that stalls (under 50 KB/s for a minute) is restarted and resumes.
 #>
 param(
     [string]$LlamaServer = "D:\llama.cpp\llama-server.exe",
@@ -40,7 +44,8 @@ param(
     [int]$MinHeadroom = 3,
     [int]$PauseHeadroom = 8,
     [int]$MaxGpuWatts = 100,
-    [int]$GpuPowerLimit = 0
+    [int]$GpuPowerLimit = 0,
+    [switch]$DownloadOnly
 )
 
 $Root = Split-Path -Parent $PSScriptRoot
@@ -188,8 +193,9 @@ function Get-Model($m) {
     $part = "$path.part"
     $url = "$HF/$($m.Repo)/resolve/main/$($m.File)"
     Say "downloading $($m.File)"
-    for ($try = 1; $try -le 30; $try++) {
-        & curl.exe -L -f -C - -o $part $url | Out-Host
+    for ($try = 1; $try -le 60; $try++) {
+        # A connection that goes quiet is dropped after a minute instead of hanging; the loop resumes it.
+        & curl.exe -L -f -C - --speed-limit 51200 --speed-time 60 -o $part $url | Out-Host
         $code = $LASTEXITCODE
         if ($code -eq 0) {
             Rename-Item -Path $part -NewName $m.File
@@ -199,7 +205,8 @@ function Get-Model($m) {
             Say "download refused by the server (wrong file name or no access): $url"
             return $null
         }
-        Say "download interrupted (curl exit $code), resuming, attempt $try of 30"
+        $have = if (Test-Path $part) { [math]::Round((Get-Item $part).Length / 1e9, 2) } else { 0 }
+        Say "download interrupted (curl exit $code) at $have GB, resuming, attempt $try of 60"
         Start-Sleep -Seconds 5
     }
     return $null
@@ -266,6 +273,23 @@ function Update-Results {
             Copy-Item $src (Join-Path $cards "$($_.Name).md") -Force
         }
     }
+}
+
+if ($DownloadOnly) {
+    $missing = 0
+    foreach ($m in $Models) {
+        if ($Only.Count -gt 0 -and ($Only -notcontains $m.Name)) { continue }
+        $path = Get-Model $m
+        if ($path) {
+            Say ("{0,-14} ready  {1:N2} GB  {2}" -f $m.Name, ((Get-Item $path).Length / 1e9), $m.File)
+        } else {
+            Say "$($m.Name) NOT downloaded"
+            $missing++
+        }
+    }
+    if ($missing -gt 0) { Say "$missing model(s) missing: run the same command again to resume"; exit 1 }
+    Say "all models downloaded. Next: powershell -ExecutionPolicy Bypass -File scripts\run_all.ps1"
+    exit 0
 }
 
 # The first hand-made run is the same experiment as llama31-8b-q4--hardened-none; keep it out of the tables.
