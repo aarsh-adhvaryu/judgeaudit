@@ -14,8 +14,14 @@ are skipped (-RedoBench measures them again).
 
 scripts\gpu_guard.py runs alongside: it logs charger state and GPU temperature and
 power once a second to logs\telemetry-<start>.csv, and stops llama-server when the
-charger goes offline or the GPU passes -TempLimit. The script then waits until it
-is safe and resumes. Everything printed here is also kept in logs\run_all-<start>.log.
+charger goes offline, the GPU passes -TempLimit, its hotspot comes within
+-MinHeadroom degrees of its throttle limit, or the GPU stops answering. The script
+then waits until it is safe and resumes; if the GPU is gone it stops and asks for a
+reboot instead of carrying on on the CPU. Everything printed here is also kept in
+logs\run_all-<start>.log.
+
+-GpuPowerLimit 80 caps the GPU at 80 W for this boot (needs an administrator
+PowerShell and a driver that allows it; the script reports whether it took effect).
 
   powershell -ExecutionPolicy Bypass -File scripts\run_all.ps1
   powershell -ExecutionPolicy Bypass -File scripts\run_all.ps1 -Only llama31-8b-q4
@@ -26,7 +32,9 @@ param(
     [string[]]$Only = @(),
     [switch]$SkipBench,
     [switch]$RedoBench,
-    [int]$TempLimit = 90
+    [int]$TempLimit = 90,
+    [int]$MinHeadroom = 3,
+    [int]$GpuPowerLimit = 0
 )
 
 $Root = Split-Path -Parent $PSScriptRoot
@@ -130,7 +138,7 @@ function Stop-Guard {
 
 function Start-Guard {
     Stop-Guard
-    $argList = @("`"$Guard`"", "watch", "--csv", "`"$Telemetry`"", "--trip-log", "`"$CrashLog`"", "--temp-limit", "$TempLimit", "--parent-pid", "$PID")
+    $argList = @("`"$Guard`"", "watch", "--csv", "`"$Telemetry`"", "--trip-log", "`"$CrashLog`"", "--temp-limit", "$TempLimit", "--min-headroom", "$MinHeadroom", "--parent-pid", "$PID")
     Start-Process -FilePath $Py -ArgumentList $argList -NoNewWindow | Out-Null
 }
 
@@ -138,8 +146,9 @@ function Wait-Safe {
     # Blocks while the charger is offline or the GPU is still hot. Gives up after 30 minutes.
     $resumeBelow = $TempLimit - 15
     for ($i = 0; $i -lt 180; $i++) {
-        $why = & $Py $Guard check --temp-limit $resumeBelow
+        $why = & $Py $Guard check --temp-limit $resumeBelow --require-gpu
         if ($LASTEXITCODE -eq 0) { return }
+        if ($LASTEXITCODE -eq 2) { throw "$why" }
         if ($i % 6 -eq 0) { Say "not loading the GPU yet: $why" }
         Start-Sleep -Seconds 10
     }
@@ -190,7 +199,14 @@ function Start-Server([string]$path, [int]$parallel, [string]$tag) {
     for ($i = 0; $i -lt 150; $i++) {
         Start-Sleep -Seconds 2
         if ($proc.HasExited) { break }
-        if (Test-Server) { return $true }
+        if (Test-Server) {
+            # Without a usable GPU llama-server quietly runs on the CPU: correct verdicts, meaningless speeds.
+            if (Select-String -Path $log -Pattern "failed to initialize CUDA" -Quiet) {
+                Stop-Server
+                throw "llama-server could not use the GPU (see $log): reboot before running again"
+            }
+            return $true
+        }
     }
     Say "llama-server did not become ready. Last lines of $log :"
     if (Test-Path $log) { Get-Content $log -Tail 15 | Out-Host }
@@ -251,8 +267,16 @@ $history = Save-Evidence "run_all started (looking back 4 hours)" 240
 Say "Windows logged $history graphics-driver, charger or unexpected-shutdown events in the last 4 hours (details in logs\crashes.log)"
 if (Get-Process -Name "llama-server" -ErrorAction SilentlyContinue) { Say "stopping the llama-server that is already running" }
 Stop-Server
+if ($GpuPowerLimit -gt 0) {
+    & nvidia-smi -pl $GpuPowerLimit | Out-Host
+}
+# Speeds depend on the power the GPU may draw (laptop performance mode or -GpuPowerLimit): record it with every run.
+$GpuWatts = 0
+try { $GpuWatts = [int][double]("" + (& nvidia-smi --query-gpu=enforced.power.limit --format=csv,noheader,nounits | Select-Object -First 1)).Trim() } catch { }
+Say "GPU power limit in force: $GpuWatts W"
+if ($GpuPowerLimit -gt 0 -and $GpuWatts -ne $GpuPowerLimit) { Say "the $GpuPowerLimit W cap did NOT take effect (needs an administrator PowerShell, and not every laptop driver allows it)" }
 Start-Guard
-Say "gpu_guard is logging to $Telemetry and stops llama-server if the charger drops or the GPU reaches $TempLimit C"
+Say "gpu_guard is logging to $Telemetry and stops llama-server if the charger drops, the GPU reaches $TempLimit C, its hotspot is within $MinHeadroom C of its limit, or the GPU stops answering"
 $started = Get-Date
 
 try {
@@ -266,7 +290,7 @@ try {
         if (-not (Start-Server $path 4 $m.Name)) { Say "skipping $($m.Name): server failed to start"; continue }
         $vram = Get-Vram
         Say "server ready, GPU memory in use: $vram MiB"
-        $base = @("judge.label=$($m.Label)", "concurrency=4", "meta.model=$($m.Name)", "meta.model_gb=$sizeGb", "meta.vram_mib=$vram", "meta.parallel=4") + @($m.Sets)
+        $base = @("judge.label=$($m.Label)", "concurrency=4", "meta.model=$($m.Name)", "meta.model_gb=$sizeGb", "meta.vram_mib=$vram", "meta.parallel=4", "meta.gpu_power_limit_w=$GpuWatts") + @($m.Sets)
 
         foreach ($style in @("hardened", "naive")) {
             foreach ($ref in @("none", "given")) {

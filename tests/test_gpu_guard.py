@@ -14,8 +14,10 @@ _spec.loader.exec_module(gpu_guard)
 Sample = gpu_guard.Sample
 
 
-def gpu(temp):
-    return (temp,) + (None,) * (len(gpu_guard.GPU_FIELDS) - 1)
+def gpu(temp, headroom=None):
+    values = [None] * len(gpu_guard.GPU_FIELDS)
+    values[0], values[5] = temp, headroom
+    return tuple(values)
 
 
 def test_parse_gpu_line_handles_numbers_flags_and_missing_values():
@@ -35,6 +37,24 @@ def test_parse_gpu_line_handles_numbers_flags_and_missing_values():
 )
 def test_unsafe_reason(sample, unsafe):
     assert bool(gpu_guard.unsafe_reason(sample, temp_limit=90)) is unsafe
+
+
+def test_hotspot_headroom_trips_before_the_temperature_limit():
+    # The real failure: 85 C on the main sensor, limit 90 C, but the hotspot already past its own limit.
+    hot = Sample(ac_online=True, gpu=gpu(85.0, headroom=-1.0))
+    assert gpu_guard.unsafe_reason(hot, temp_limit=90) is None
+    assert "hotspot" in gpu_guard.unsafe_reason(hot, temp_limit=90, min_headroom=3)
+    assert gpu_guard.unsafe_reason(Sample(ac_online=True, gpu=gpu(80.0, headroom=9.0)), 90, min_headroom=3) is None
+
+
+def test_guard_trips_when_the_gpu_stops_answering():
+    kills, logs = [], []
+    guard = gpu_guard.Guard(temp_limit=90, kill=lambda: kills.append(1) or True, log=logs.append)
+    assert guard.step(Sample(ac_online=True, gpu=gpu(None)), now=0) == ""       # no GPU sensors at all: fine
+    assert guard.step(Sample(ac_online=True, gpu=gpu(80.0, headroom=9.0)), now=1) == ""
+    # Hung GPU: stale numbers keep coming, the headroom reading is gone.
+    assert "stopped answering" in guard.step(Sample(ac_online=True, gpu=gpu(80.0)), now=2)
+    assert len(kills) == 1
 
 
 def test_guard_stops_the_server_when_the_charger_drops_and_reports_recovery():

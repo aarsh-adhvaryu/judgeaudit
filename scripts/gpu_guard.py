@@ -1,15 +1,19 @@
 """Power and temperature guard for long unattended GPU runs on a laptop.
 
-Background: on the development laptop the whole machine lost power twice, each
-time after about three minutes of sustained GPU load, and once Windows logged the
-charger going offline 20 seconds earlier. A hard power-off leaves no application
-log, so this script keeps one:
+Background: on the development laptop the whole machine lost power three times
+under GPU load. The third time this log caught it: 44 seconds into the load, at
+about 135 W, the GPU's hotspot passed its throttle limit (nvidia-smi's
+temperature.gpu.tlimit went negative), the GPU stopped answering, and the machine
+died 95 seconds later. A hard power-off leaves no application log, so this script
+keeps one:
 
   watch   once a second, append charger state, battery level and GPU temperature,
-          power and throttle flags to a CSV (flushed to disk on every row). If the
-          charger goes offline or the GPU passes the temperature limit, stop the
-          judge server so the load ends before the machine does.
-  check   exit 0 when it is safe to load the GPU, 1 otherwise (reason on stdout).
+          power and throttle flags to a CSV (flushed to disk on every row). Stop
+          the judge server, so the load ends before the machine does, when the
+          charger goes offline, the GPU passes the temperature limit, its hotspot
+          gets too close to its own limit, or the GPU stops answering.
+  check   exit 0 when it is safe to load the GPU, 1 when it is not yet, 2 when the
+          GPU is gone and only a reboot brings it back (reason on stdout).
 
 Standard library only. scripts/run_all.ps1 starts and stops it.
 """
@@ -54,6 +58,11 @@ class Sample:
     def temp_c(self) -> float | None:
         return self.gpu[0]
 
+    @property
+    def headroom_c(self) -> float | None:
+        # Degrees left before the GPU throttles itself, measured at its hottest sensor.
+        return self.gpu[5]
+
 
 def parse_gpu_line(line: str) -> tuple:
     """One nvidia-smi csv,noheader,nounits line -> one value per GPU_FIELDS entry."""
@@ -70,20 +79,28 @@ def parse_gpu_line(line: str) -> tuple:
     return tuple(out + [None] * (len(GPU_FIELDS) - len(out)))
 
 
-def unsafe_reason(sample: Sample, temp_limit: float) -> str | None:
+def unsafe_reason(sample: Sample, temp_limit: float, min_headroom: float | None = None) -> str | None:
     """Why the GPU should not be under load right now, or None when it is fine."""
     if sample.ac_online is False:
         return "charger offline, running on battery"
     if sample.temp_c is not None and sample.temp_c >= temp_limit:
         return f"GPU at {sample.temp_c:.0f} C, limit {temp_limit:.0f} C"
+    if min_headroom is not None and sample.headroom_c is not None and sample.headroom_c <= min_headroom:
+        temp = "unknown" if sample.temp_c is None else f"{sample.temp_c:.0f} C"
+        return (f"GPU hotspot {sample.headroom_c:.0f} C from its throttle limit "
+                f"(stops at {min_headroom:.0f} C or less), GPU at {temp}")
     return None
 
 
 class Guard:
     """Decides, sample by sample, when to stop the server and what to log."""
 
-    def __init__(self, temp_limit: float, kill, log, rekill_every_s: float = 5.0):
+    def __init__(self, temp_limit: float, kill, log, rekill_every_s: float = 5.0,
+                 min_headroom: float | None = None):
         self.temp_limit = temp_limit
+        self.min_headroom = min_headroom
+        self._seen_temp = False
+        self._seen_headroom = False
         self._kill = kill
         self._log = log
         self._rekill_every_s = rekill_every_s
@@ -92,7 +109,13 @@ class Guard:
 
     def step(self, sample: Sample, now: float) -> str:
         """Returns the note for this sample's CSV row."""
-        reason = unsafe_reason(sample, self.temp_limit)
+        reason = unsafe_reason(sample, self.temp_limit, self.min_headroom)
+        # A GPU that hangs keeps reporting its last numbers but loses the headroom reading;
+        # a GPU the driver has dropped reports nothing at all.
+        if (self._seen_temp and sample.temp_c is None) or (self._seen_headroom and sample.headroom_c is None):
+            reason = reason or "GPU stopped answering (hung or dropped by the driver)"
+        self._seen_temp = self._seen_temp or sample.temp_c is not None
+        self._seen_headroom = self._seen_headroom or sample.headroom_c is not None
         note = ""
         if reason:
             if now - self._last_kill >= self._rekill_every_s:
@@ -227,7 +250,7 @@ def watch(args) -> int:
                 handle.flush()
                 os.fsync(handle.fileno())
 
-    guard = Guard(args.temp_limit, kill=lambda: kill_image(args.image), log=log)
+    guard = Guard(args.temp_limit, kill=lambda: kill_image(args.image), log=log, min_headroom=args.min_headroom)
     new_file = not csv_path.exists()
     with open(csv_path, "a", newline="", encoding="ascii") as handle:
         writer = csv.writer(handle)
@@ -250,6 +273,9 @@ def watch(args) -> int:
 def check(args) -> int:
     ac, pct = read_power()
     sample = Sample(ac_online=ac, battery_pct=pct, gpu=read_gpu_once(), gpu_age_s=0.0)
+    if args.require_gpu and sample.temp_c is None:
+        print("nvidia-smi does not see the GPU (hung or dropped by the driver): reboot before running again")
+        return 2
     reason = unsafe_reason(sample, args.temp_limit)
     temp = "unknown" if sample.temp_c is None else f"{sample.temp_c:.0f} C"
     print(reason or f"ok (charger {'online' if ac else 'state unknown'}, GPU {temp})")
@@ -263,12 +289,15 @@ def main(argv: list[str] | None = None) -> int:
     w.add_argument("--csv", required=True)
     w.add_argument("--trip-log", help="append a line here whenever the guard trips")
     w.add_argument("--temp-limit", type=float, default=90.0)
+    w.add_argument("--min-headroom", type=float,
+                   help="also trip when the hotspot is this many C or fewer from its throttle limit")
     w.add_argument("--interval", type=float, default=1.0)
     w.add_argument("--image", default="llama-server.exe", help="process image to stop on a trip")
     w.add_argument("--parent-pid", type=int, help="exit when this process is gone")
     w.set_defaults(func=watch)
     c = sub.add_parser("check", help="exit 0 when it is safe to load the GPU")
     c.add_argument("--temp-limit", type=float, default=75.0)
+    c.add_argument("--require-gpu", action="store_true", help="exit 2 when nvidia-smi reports no GPU")
     c.set_defaults(func=check)
     args = parser.parse_args(argv)
     try:
