@@ -294,16 +294,31 @@ def compute_summary(rows: list[dict], thresholds: dict, run_info: dict, seed: in
 
     checks = [_check(name, rule, metrics) for name, rule in (thresholds or {}).items()]
     failed = [c for c in checks if c["passed"] is False]
+    unevaluated = [c for c in checks if c["passed"] is None]
+    failed_calls = int(run_info.get("failed_calls", 0))
+    complete = not unevaluated and failed_calls == 0
     if not checks:
         verdict = "NO THRESHOLDS SET"
     elif failed:
         verdict = f"NOT TRUSTED: {len(failed)} of {len(checks)} checks failed"
+        if not complete:
+            verdict += " (run incomplete)"
+    elif not complete:
+        # Never report trust for something that was not measured.
+        parts = []
+        if failed_calls:
+            parts.append(f"{failed_calls} judge calls failed")
+        if unevaluated:
+            parts.append(f"{len(unevaluated)} checks could not be measured")
+        verdict = "INCOMPLETE, NO VERDICT: " + " and ".join(parts)
     else:
         verdict = f"TRUSTED ON THIS SUITE: all {len(checks)} checks passed"
 
     return {
         "verdict": verdict,
-        "passed": bool(checks) and not failed,
+        "passed": bool(checks) and not failed and complete,
+        "failed_calls": failed_calls,
+        "unevaluated": [c["metric"] for c in unevaluated],
         "run": run_info,
         "n_items": len(index),
         "n_rows": len(usable),

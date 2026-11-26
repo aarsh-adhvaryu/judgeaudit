@@ -66,7 +66,27 @@ def test_failed_calls_are_retried_on_the_next_run(make_cfg):
     judge = FlakyJudge(knowledge=1.0, noise=0.0)
     first = run_audit(cfg, judge=judge, log=quiet)
     assert first["run"]["failed_calls"] == 11 and first["n_items"] == 39
+    assert first["verdict"].startswith("INCOMPLETE") and not first["passed"]
     judge.broken = False
     second = run_audit(cfg, judge=judge, log=quiet)
     assert second["run"]["new_calls"] == 11 and second["run"]["failed_calls"] == 0
     assert second["n_items"] == 40
+    assert second["passed"] and second["verdict"].startswith("TRUSTED")
+
+
+class DownJudge(MockJudge):
+    """A judge whose server is not running."""
+
+    def judge(self, request):
+        raise JudgeError("connection refused")
+
+
+def test_a_judge_that_is_down_never_gets_a_trusted_verdict(make_cfg):
+    summary = run_audit(make_cfg(), judge=DownJudge(), log=quiet)
+    assert summary["run"]["failed_calls"] == 440 and summary["n_rows"] == 0
+    assert summary["passed"] is False
+    assert summary["verdict"].startswith("INCOMPLETE")
+    assert summary["unevaluated"]
+    out = Path(make_cfg()["out_dir"])
+    report = (out / "t" / "report.md").read_text(encoding="utf-8")
+    assert "Incomplete run" in report and "440 judge calls failed" in report

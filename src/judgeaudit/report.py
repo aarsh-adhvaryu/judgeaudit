@@ -57,6 +57,18 @@ def _failures(summary: dict) -> list[str]:
     return lines
 
 
+def _incomplete(summary: dict) -> list[str]:
+    lines = []
+    if summary.get("failed_calls"):
+        lines.append(
+            f"{summary['failed_calls']} judge calls failed (server unreachable or erroring). "
+            "Re-run to retry them; the numbers below cover only the calls that succeeded."
+        )
+    for name in summary.get("unevaluated", []):
+        lines.append(f"Could not be measured: {LABELS.get(name, name)}")
+    return lines
+
+
 def _perf_lines(summary: dict) -> list[tuple[str, str]]:
     perf, run = summary["perf"], summary["run"]
     lines = [
@@ -85,6 +97,9 @@ def render_markdown(summary: dict) -> str:
     failures = _failures(summary)
     if failures:
         out += ["## Do not trust this judge when", ""] + [f"- {line}" for line in failures] + [""]
+    incomplete = _incomplete(summary)
+    if incomplete:
+        out += ["## Incomplete run", ""] + [f"- {line}" for line in incomplete] + [""]
     out += [
         f"Suite `{run['suite']}` ({run['suite_sha256']}), split `{run['split']}`, "
         f"{summary['n_items']} items, {summary['n_rows']} verdicts, "
@@ -146,6 +161,11 @@ def render_html(summary: dict) -> str:
     if failures:
         parts.append("<h2>Do not trust this judge when</h2><ul>")
         parts += [f"<li>{e(line)}</li>" for line in failures]
+        parts.append("</ul>")
+    incomplete = _incomplete(summary)
+    if incomplete:
+        parts.append("<h2>Incomplete run</h2><ul>")
+        parts += [f"<li>{e(line)}</li>" for line in incomplete]
         parts.append("</ul>")
     for title, prefixes in SECTIONS:
         rows = _rows(summary, prefixes)
