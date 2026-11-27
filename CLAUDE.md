@@ -44,5 +44,5 @@ pacing (pause at 8 C of hotspot headroom). After any crash read the newest
 
 ## Where things are
 - `results/v0/`: the first round (40 items, 26 Nov): 5 models, plain judges.
-- `results/`: the current round (100 items): comparison, recommendation, dashboard.
+- `results/`: the current round (100 items, rounds 1 and 2 of tuning, 27 Nov): comparison, recommendation, dashboard. Headline findings are in README.md under Results.
 - `runs/_archive/v0/`: the v0 run folders; their calls are still in the cache.

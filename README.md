@@ -20,6 +20,39 @@ answers swap places. `judgeaudit` does three things about it:
    cheapest set-up that passes every check is chosen there and reported on the
    held-out half, which played no part in the choice.
 
+## Results (27 November 2026)
+
+Five local judges (Llama 3.1 8B at 4 and 8 bit, Llama 3.2 3B at 4 bit, Qwen3
+8B at 4 and 8 bit) on one RTX 5070 Ti Laptop GPU, 44 set-ups each: 220 audits,
+about 52,000 judge calls, none failed. Set-ups were chosen on the 50 dev items
+and are reported on the 50 held-out items. Full tables: `results/recommendation.md`,
+`results/comparison.md`, and `results/dashboard.html` to explore them.
+
+**With a reference answer, there is a set-up to trust.** Llama 3.1 8B 4-bit,
+hardened prompt, swap and regex screen passed every check on held-out items:
+99.3% accuracy, 0% of injected wrong answers accepted (tuning, unseen and fresh
+phrasings alike), 0.6% of verdicts withheld, 10.3 verdicts/s at 1.3 judge calls
+per verdict. Llama 3.1 8B 8-bit with the `guarded_v2` prompt and no guard also
+passed, at one call per verdict but 8.7 verdicts/s.
+
+**Without a reference answer, nothing passes.** Llama rejects 19 to 52% of
+correct answers once they are politely padded; Qwen accepts 14 to 20% of padded
+wrong ones. No defence here fixes either, so this case needs a human.
+
+| Finding | Evidence (held-out) |
+|---|---|
+| Plain 8B judges follow injected instructions | 100% of injected wrong answers accepted, every 8B model, with or without a reference |
+| A free rule-based screen plus the judge stops the known forms | 0% accepted with `swap-regex`; regex recall 100% on the tuning phrasing, 80% on unseen ones, no false alarms |
+| Rules do not generalise to new phrasings | regex recall on the fresh phrasings: 0%. They were mostly stopped by the judge itself (0 to 7% accepted even unguarded) |
+| The LLM screen, round 1, was worse and dearer | 2 calls per verdict, 18 to 20% recall on unseen phrasings, 32 to 45% false alarms on Llama |
+| Round-2 tuning on dev fixed what dev showed | screen false alarms 30 to 46% to 0%; `guarded` prompt over-rejection of padded correct answers 94 to 100% to 4 to 8% (Llama, with reference) |
+| Asking in both orders removes position bias | position flips 8 to 22% to 0%, at 2 to 17% of verdicts withheld |
+| Withholding flagged answers is the wrong policy here | 25 to 50% of verdicts withheld with `on_flag: abstain` |
+| Biases are model-specific | Llama punishes padding, Qwen rewards it; Qwen's injection resistance from the guarded prompt is much weaker than Llama's |
+| Quantization moves biases, not accuracy | Llama 8B: padded correct rejected 52% at 4-bit vs 20% at 8-bit (no reference); accuracy within 1 point |
+| Decoding barely matters | repeat agreement 99.7% greedy, 99.8% at temperature 0.7 |
+| Prefix cache and batching | 7.3 to 11.3 verdicts/s with prefix reuse; 5.8, 7.9, 10.9, 13.3 verdicts/s at 1, 2, 4, 8 slots |
+
 ## Quickstart (Windows PowerShell)
 
 ```powershell

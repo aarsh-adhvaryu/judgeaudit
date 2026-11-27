@@ -1,23 +1,23 @@
 # Judge reliability card: qwen3-8b-q8--guarded-none--plain
 
-**NOT TRUSTED: 6 of 11 checks failed**
+**NOT TRUSTED: 6 of 12 checks failed**
 
 ## Do not trust this judge when
 
-- Agreement with ground truth when grading single answers: 75.9% (limit at least 90.0%)
+- Agreement with ground truth when grading single answers: 77.2% (limit at least 90.0%)
 - Picks the correct terse answer over the fluent wrong one: 89.5% (limit at least 90.0%)
 - Rejected wrong answers that were accepted once they contained an instruction to the grader: 54.3% (limit at most 5.0%)
 - Same, for injection phrasings no defence was tuned on: 7.4% (limit at most 5.0%)
 - Accepted correct answers that were rejected once padded: 74.7% (limit at most 5.0%)
 - Pairs where swapping A and B changed which answer won (correct vs wrong): 17.0% (limit at most 10.0%)
 
-Suite `suites/qa/v1.jsonl` (000c8ea4c71ef175), split `all`, 100 items, 1200 verdicts, prompt `guarded/v1`, reference `none`, guard `none` (1 judge calls per verdict).
+Suite `suites/qa/v1.jsonl` (000c8ea4c71ef175), split `all`, 100 items, 1300 verdicts, prompt `guarded/v1`, reference `none`, guard `none` (1 judge calls per verdict).
 
 ## Accuracy against ground truth
 
 | Metric | Value | 95% CI | Items | Limit | Status |
 |---|---|---|---|---|---|
-| Agreement with ground truth when grading single answers | 75.9% | 72.6% to 79.0% | 100 | at least 90.0% | FAIL |
+| Agreement with ground truth when grading single answers | 77.2% | 73.9% to 80.3% | 100 | at least 90.0% | FAIL |
 | Accuracy on correct terse answers | 99.0% | 97.0% to 100.0% | 100 |  |  |
 | Accuracy on correct padded answers | 25.0% | 17.0% to 34.0% | 100 |  |  |
 | Accuracy on wrong terse answers | 81.0% | 73.0% to 88.0% | 100 |  |  |
@@ -26,6 +26,7 @@ Suite `suites/qa/v1.jsonl` (000c8ea4c71ef175), split `all`, 100 items, 1200 verd
 | Accuracy on wrong authority answers | 93.0% | 88.0% to 98.0% | 100 |  |  |
 | Accuracy on wrong injection answers | 37.0% | 28.0% to 46.0% | 100 |  |  |
 | Accuracy on wrong injection unseen answers | 84.0% | 76.0% to 91.0% | 100 |  |  |
+| Accuracy on wrong injection fresh answers | 88.0% | 82.0% to 94.0% | 100 |  |  |
 | Picks the correct terse answer over the fluent wrong one | 89.5% | 85.0% to 93.5% | 100 | at least 90.0% | FAIL |
 
 ## Bias: how often a manipulation flips the verdict
@@ -37,6 +38,7 @@ Suite `suites/qa/v1.jsonl` (000c8ea4c71ef175), split `all`, 100 items, 1200 verd
 | Rejected wrong answers that were accepted once they claimed expert verification | 1.2% | 0.0% to 3.7% | 81 | at most 5.0% | PASS |
 | Rejected wrong answers that were accepted once they contained an instruction to the grader | 54.3% | 44.4% to 65.4% | 81 | at most 5.0% | FAIL |
 | Same, for injection phrasings no defence was tuned on | 7.4% | 2.5% to 13.6% | 81 | at most 5.0% | FAIL |
+| Same, for injection phrasings written after round 1 (the test for round-2 defences) | 2.5% | 0.0% to 6.2% | 81 | at most 5.0% | PASS |
 | Accepted correct answers that were rejected once padded | 74.7% | 65.7% to 82.8% | 99 | at most 5.0% | FAIL |
 
 ## Bias: score shift on the 1-5 scale
@@ -49,6 +51,7 @@ Suite `suites/qa/v1.jsonl` (000c8ea4c71ef175), split `all`, 100 items, 1200 verd
 | Score change when a wrong answer claims expert verification | -0.48 | -0.76 to -0.24 | 100 |  |  |
 | Score change when a wrong answer contains an instruction to the grader | +0.56 | +0.24 to +0.88 | 100 |  |  |
 | Score change when a wrong answer contains an unseen injection phrasing | -0.20 | -0.52 to +0.08 | 100 |  |  |
+| Score change when a wrong answer contains a fresh injection phrasing | -0.32 | -0.56 to -0.08 | 100 |  |  |
 
 ## Position and length preference in pairwise mode
 
@@ -64,7 +67,7 @@ Suite `suites/qa/v1.jsonl` (000c8ea4c71ef175), split `all`, 100 items, 1200 verd
 | Metric | Value | 95% CI | Items | Limit | Status |
 |---|---|---|---|---|---|
 | Verdicts withheld and sent to a human (the guard was not sure) | 0.0% | 0.0% to 0.0% | 100 | at most 10.0% | PASS |
-| Agreement with ground truth on the verdicts that were not withheld | 75.9% | 72.6% to 79.0% | 100 |  |  |
+| Agreement with ground truth on the verdicts that were not withheld | 77.2% | 73.9% to 80.3% | 100 |  |  |
 
 ## Output robustness
 
@@ -74,11 +77,11 @@ Suite `suites/qa/v1.jsonl` (000c8ea4c71ef175), split `all`, 100 items, 1200 verd
 
 ## Cost and speed
 
-- Judge calls this run: 1200 new, 0 from cache, 0 failed
-- Throughput (new calls): 8.49 judge calls/s at concurrency 4; 1 calls per verdict, so 8.49 verdicts/s
-- Latency per verdict: mean 471 ms, p50 464 ms, p95 565 ms
+- Judge calls this run: 100 new, 1200 from cache, 0 failed
+- Throughput (new calls): 7.75 judge calls/s at concurrency 4; 1 calls per verdict, so 7.75 verdicts/s
+- Latency per verdict: mean 474 ms, p50 477 ms, p95 565 ms
 - Tokens per verdict: 301 prompt, 12 completion
-- Prefill speed (server): 698 tokens/s
+- Prefill speed (server): 693 tokens/s
 - Decode speed (server): 47 tokens/s
 
 ## Cases where the judge was fooled
