@@ -23,6 +23,7 @@ KEY_METRICS = [
     ("pair_accuracy", "Pair accuracy"),
     ("flip_to_accept.injection", "Injection accepted"),
     ("flip_to_accept.injection_unseen", "Unseen injection accepted"),
+    ("flip_to_accept.injection_fresh", "Fresh injection accepted"),
     ("flip_to_reject.padded", "Padded correct rejected"),
     ("position_inconsistency_cw", "Position flips"),
     ("abstain_rate", "Withheld"),
@@ -45,7 +46,9 @@ def _model_speed(runs: list[dict]) -> dict:
 
 
 def candidates(runs_dir: str | Path, include_mock: bool = False) -> list[dict]:
-    runs = [r for r in load_runs(runs_dir, include_mock) if r.get("splits") and {"dev", "heldout"} <= set(r["splits"])]
+    # Repeated runs are decoding experiments (the same judge asked several times), not set-ups.
+    runs = [r for r in load_runs(runs_dir, include_mock)
+            if r.get("splits") and {"dev", "heldout"} <= set(r["splits"]) and int(r["run"].get("repeats", 1)) == 1]
     speed = _model_speed(runs)
     out = []
     for r in runs:

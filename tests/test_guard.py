@@ -56,7 +56,7 @@ def test_swap_removes_planted_position_bias(make_cfg):
     assert guarded["metrics"]["position_inconsistency_cw"]["value"] == 0.0
     assert guarded["metrics"]["abstain_rate"]["value"] > 0.0
     # swapped halves are other cases' calls: no extra judge calls were needed
-    assert guarded["run"]["new_calls"] == 0 and guarded["run"]["cached_calls"] == 480
+    assert guarded["run"]["new_calls"] == 0 and guarded["run"]["cached_calls"] == 520
     assert guarded["run"]["calls_per_verdict"] > 1
 
 
@@ -71,9 +71,9 @@ def test_llm_screen_with_reject_stops_planted_injection_and_counts_its_cost(make
     assert m["flip_to_accept.injection"]["value"] < 0.2
     assert m["flip_to_accept.injection_unseen"]["value"] < 0.2
     assert m["screen.flag_rate_correct"]["value"] == 0.0
-    # one screen call per pointwise case (8 of 12 variants), the rest from cache
-    assert screened["run"]["new_calls"] == 40 * 8
-    assert screened["run"]["calls_per_verdict"] == pytest.approx(20 / 12, abs=1e-3)
+    # one screen call per pointwise case (9 of 13 variants), the rest from cache
+    assert screened["run"]["new_calls"] == 40 * 9
+    assert screened["run"]["calls_per_verdict"] == pytest.approx(22 / 13, abs=1e-3)
 
 
 def test_abstaining_screen_withholds_instead_of_rejecting(make_cfg):
@@ -85,3 +85,23 @@ def test_abstaining_screen_withholds_instead_of_rejecting(make_cfg):
     assert all(r["abstained"] and r["verdict"] is None and r["flag_reason"].startswith("regex:") for r in seen)
     assert s["metrics"]["flip_to_accept.injection"]["value"] == 0.0
     assert s["run"]["calls_per_verdict"] == 1  # the regex screen is free
+
+
+def test_fresh_injections_are_new_and_the_regex_was_not_changed_for_them():
+    from judgeaudit.tasks.qa import FRESH_INJECTIONS
+
+    assert not set(FRESH_INJECTIONS) & set(UNSEEN_INJECTIONS) and INJECTION not in FRESH_INJECTIONS
+    cases = [c for c in load_cases("qa", SUITE, "none") if c.variant == "wrong_injection_fresh"]
+    assert {next(t for t in FRESH_INJECTIONS if c.answer.endswith(t)) for c in cases} == set(FRESH_INJECTIONS)
+
+
+def test_screen_prompt_version_changes_the_screen_call_only():
+    from judgeaudit.prompts import build_messages, build_screen_messages
+
+    case = next(c for c in load_cases("qa", SUITE, "none") if c.variant == "correct_padded")
+    v1, v2 = build_screen_messages(case, "v1"), build_screen_messages(case, "v2")
+    assert v1[1] == v2[1] and v1[0] != v2[0]
+    assert build_messages(case, "guarded_v2")[1]["content"].startswith("QUESTION:")
+    assert guards.describe(guards.normalise_guard({"swap": True, "screen": "both", "screen_prompt": "v2"})) == "swap+screen=both(v2)/reject"
+    with pytest.raises(ValueError):
+        guards.normalise_guard({"screen_prompt": "v3"})

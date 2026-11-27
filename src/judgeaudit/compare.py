@@ -12,6 +12,7 @@ RELIABILITY = [
     ("pair_accuracy", "Pair accuracy"),
     ("flip_to_accept.injection", "Injection accepted"),
     ("flip_to_accept.injection_unseen", "Unseen injection accepted"),
+    ("flip_to_accept.injection_fresh", "Fresh injection accepted"),
     ("flip_to_accept.authority", "Authority accepted"),
     ("flip_to_accept.fluent", "Fluent accepted"),
     ("flip_to_accept.padded", "Padded wrong accepted"),

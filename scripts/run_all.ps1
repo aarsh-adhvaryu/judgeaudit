@@ -34,9 +34,10 @@ the GPU overheat: the power-mode gate is then skipped and the clock cap does its
 
 For every model the script runs a grid of configurations, each scored on the dev
 and held-out halves of the suite in the same run:
-  prompt    naive (plain only), hardened, guarded
+  prompt    naive (plain only), hardened, guarded, guarded_v2
   reference none, given
-  guard     plain, swap-regex, swap-llm, swap-both, swap-both-abstain
+  guard     plain, swap-regex, swap-llm, swap-both, swap-both-abstain,
+            swap-llm2, swap-both2 (v2 = the screen prompt from round-2 tuning)
 Most configurations re-use judge calls already made, so the grid costs about four
 audits of fresh calls per model.
 
@@ -87,7 +88,10 @@ $Guards = @(
     @{ Name = "swap-regex"; Sets = @("guard.swap=true", "guard.screen=regex") },
     @{ Name = "swap-llm"; Sets = @("guard.swap=true", "guard.screen=llm") },
     @{ Name = "swap-both"; Sets = @("guard.swap=true", "guard.screen=both") },
-    @{ Name = "swap-both-abstain"; Sets = @("guard.swap=true", "guard.screen=both", "guard.on_flag=abstain") }
+    @{ Name = "swap-both-abstain"; Sets = @("guard.swap=true", "guard.screen=both", "guard.on_flag=abstain") },
+    # round 2: the screen prompt tuned on the dev half
+    @{ Name = "swap-llm2"; Sets = @("guard.swap=true", "guard.screen=llm", "guard.screen_prompt=v2") },
+    @{ Name = "swap-both2"; Sets = @("guard.swap=true", "guard.screen=both", "guard.screen_prompt=v2") }
 )
 
 $HF = "https://huggingface.co"
@@ -368,12 +372,12 @@ try {
         $base = @("judge.label=$($m.Label)", "concurrency=4", "meta.model=$($m.Name)", "meta.model_gb=$sizeGb", "meta.vram_mib=$vram", "meta.parallel=4", "meta.gpu_power_limit_w=$(Get-GpuWatts)", "meta.gpu_clock_limit_mhz=$GpuClockLimit") + @($m.Sets)
 
         # Plain judges first: every guarded configuration after them re-uses their calls.
-        foreach ($style in @("hardened", "naive", "guarded")) {
+        foreach ($style in @("hardened", "naive", "guarded", "guarded_v2")) {
             foreach ($ref in @("none", "given")) {
                 Invoke-Audit "$($m.Name)--$style-$ref--plain" ($base + @("prompt_style=$style", "reference=$ref")) @() $path 4 $m.Name
             }
         }
-        foreach ($style in @("hardened", "guarded")) {
+        foreach ($style in @("hardened", "guarded", "guarded_v2")) {
             foreach ($ref in @("none", "given")) {
                 foreach ($g in $Guards) {
                     Invoke-Audit "$($m.Name)--$style-$ref--$($g.Name)" ($base + @("prompt_style=$style", "reference=$ref") + $g.Sets) @() $path 4 $m.Name

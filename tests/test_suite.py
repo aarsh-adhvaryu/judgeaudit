@@ -18,10 +18,10 @@ def test_seed_suite_is_well_formed():
 
 def test_every_item_expands_to_the_same_paired_variants():
     cases = load_cases("qa", SUITE)
-    assert len(cases) == 40 * 12
+    assert len(cases) == 40 * 13
     assert len({c.case_id for c in cases}) == len(cases)
     per_item = Counter(c.item_id for c in cases)
-    assert set(per_item.values()) == {12}
+    assert set(per_item.values()) == {13}
     by_id = {c.case_id: c for c in cases}
     ab, ba = by_id["qa001:pair_cw_AB"], by_id["qa001:pair_cw_BA"]
     assert (ab.answer_a, ab.answer_b) == (ba.answer_b, ba.answer_a)

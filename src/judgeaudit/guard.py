@@ -26,7 +26,7 @@ from dataclasses import dataclass, replace
 from .prompts import build_messages, build_screen_messages, schema_for, SCREEN_SCHEMA
 from .schema import Case
 
-DEFAULTS = {"swap": False, "screen": "none", "on_flag": "reject"}
+DEFAULTS = {"swap": False, "screen": "none", "on_flag": "reject", "screen_prompt": "v1"}
 SCREENS = ("none", "regex", "llm", "both")
 
 
@@ -41,6 +41,8 @@ def normalise_guard(raw: dict | None) -> dict:
         raise ValueError(f"guard.screen must be one of {SCREENS}")
     if guard["on_flag"] not in ("reject", "abstain"):
         raise ValueError("guard.on_flag must be reject or abstain")
+    if guard["screen_prompt"] not in ("v1", "v2"):
+        raise ValueError("guard.screen_prompt must be v1 or v2")
     return guard
 
 
@@ -53,7 +55,8 @@ def describe(guard: dict) -> str:
     if guard["swap"]:
         parts.append("swap")
     if guard["screen"] != "none":
-        parts.append(f"screen={guard['screen']}/{guard['on_flag']}")
+        prompt = "" if guard["screen"] == "regex" or guard["screen_prompt"] == "v1" else f"({guard['screen_prompt']})"
+        parts.append(f"screen={guard['screen']}{prompt}/{guard['on_flag']}")
     return "+".join(parts) or "none"
 
 
@@ -125,7 +128,7 @@ def plan_calls(case: Case, style: str, guard: dict) -> list[SubCall]:
         other = swapped(case)
         calls.append(SubCall("swapped", other, case.mode, build_messages(other, style), schema_for(case.mode)))
     if case.mode == "pointwise" and guard["screen"] in ("llm", "both"):
-        calls.append(SubCall("screen", case, "screen", build_screen_messages(case), SCREEN_SCHEMA))
+        calls.append(SubCall("screen", case, "screen", build_screen_messages(case, guard["screen_prompt"]), SCREEN_SCHEMA))
     return calls
 
 
