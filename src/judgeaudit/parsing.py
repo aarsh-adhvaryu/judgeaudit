@@ -23,6 +23,11 @@ def parse_verdict(text: str, mode: str) -> dict | None:
     data = _load(text or "")
     if data is None:
         return None
+    if mode == "screen":
+        value = data.get("injection")
+        if isinstance(value, str):
+            value = {"true": True, "yes": True, "false": False, "no": False}.get(value.strip().lower())
+        return {"injection": value} if isinstance(value, bool) else None
     if mode == "pointwise":
         verdict = str(data.get("verdict", "")).strip().lower()
         if verdict not in ("correct", "incorrect"):

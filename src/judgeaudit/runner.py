@@ -13,11 +13,12 @@ from pathlib import Path
 import yaml
 
 from . import __version__
+from . import guard as guards
 from .cache import VerdictCache, make_key
 from .judges import JudgeError, JudgeRequest, JudgeUnreachable, build_judge
 from .metrics import compute_summary
 from .parsing import parse_verdict
-from .prompts import PROMPT_VERSION, build_messages, schema_for
+from .prompts import PROMPT_VERSION
 from .report import write_reports
 from .tasks import load_cases
 
@@ -81,23 +82,35 @@ def _previous_run(out_dir: Path) -> dict:
         return {}
 
 
-def _row(case, repeat: int, payload: dict | None, cached: bool, error: str | None) -> dict:
+def _sum(values: list) -> float | None:
+    values = [v for v in values if v is not None]
+    return sum(values) if values else None
+
+
+def _row(case, repeat: int, subs: list, payloads: dict, guard: dict, cached: bool, error: str | None) -> dict:
+    """subs: [(role, mode, key)]. One row per verdict, however many judge calls it took."""
     row = asdict(case)
-    row.update(repeat=repeat, cached=cached, error=error)
-    if payload is None:
-        row.update(raw=None, parsed_ok=False, verdict=None, score=None, winner=None)
+    row.update(repeat=repeat, cached=cached, error=error, calls=len(subs))
+    got = {role: payloads.get(key) for role, _, key in subs}
+    if error or any(p is None for p in got.values()):
+        row.update(raw=None, parsed_ok=False, verdict=None, score=None, winner=None,
+                   abstained=False, flagged=None, flag_reason=None)
         return row
-    parsed = parse_verdict(payload["text"], case.mode) or {}
+    modes = {role: mode for role, mode, _ in subs}
+    parsed = {role: parse_verdict(p["text"], modes[role]) for role, p in got.items()}
+    outcome = guards.combine(case, guard, parsed)
+    if parsed.get("main") is None:
+        outcome.update(verdict=None, score=None, winner=None)
+    raw = got["main"]["text"] if len(got) == 1 else json.dumps({r: p["text"] for r, p in got.items()})
     row.update(
-        raw=payload["text"],
-        parsed_ok=bool(parsed),
-        verdict=parsed.get("verdict"),
-        score=parsed.get("score"),
-        winner=parsed.get("winner"),
-        latency_s=payload.get("latency_s"),
-        prompt_tokens=payload.get("prompt_tokens"),
-        completion_tokens=payload.get("completion_tokens"),
-        timings=payload.get("timings"),
+        raw=raw,
+        parsed_ok=all(v is not None for v in parsed.values()),
+        **outcome,
+        # cost of the whole verdict: every call it needed
+        latency_s=_sum([p.get("latency_s") for p in got.values()]),
+        prompt_tokens=_sum([p.get("prompt_tokens") for p in got.values()]),
+        completion_tokens=_sum([p.get("completion_tokens") for p in got.values()]),
+        timings=got["main"].get("timings"),
     )
     return row
 
@@ -124,30 +137,39 @@ def run_audit(
     judge = judge or build_judge(cfg["judge"])
     fingerprint = dict(judge.fingerprint(), prompt_version=PROMPT_VERSION)
     style = cfg["prompt_style"]
+    guard = guards.normalise_guard(cfg.get("guard"))
     # use_cache=False is for speed measurements: every call really hits the judge.
     cache = VerdictCache(cfg["cache"]) if use_cache else None
 
-    jobs = []
+    # A verdict may need several judge calls (a guard asks in both orders, or screens
+    # the answer first). Identical calls are made once: the swapped half of one pair is
+    # often exactly another case's call.
+    jobs = []  # (case, repeat, [(role, mode, key)])
+    calls: dict = {}  # key -> (SubCall, repeat)
     for case in cases:
-        messages = build_messages(case, style)
-        schema = schema_for(case.mode)
+        planned = guards.plan_calls(case, style, guard)
         for repeat in range(int(cfg["repeats"])):
-            key = make_key(fingerprint, messages, schema, repeat)
-            jobs.append((key, case, repeat, messages, schema))
+            subs = []
+            for sub in planned:
+                key = make_key(fingerprint, sub.messages, sub.schema, repeat)
+                subs.append((sub.role, sub.mode, key))
+                calls.setdefault(key, (sub, repeat))
+            jobs.append((case, repeat, subs))
 
-    payloads = {key: (cache.get(key) if cache is not None else None) for key, *_ in jobs}
-    pending = [job for job in jobs if payloads[job[0]] is None]
+    payloads = {key: (cache.get(key) if cache is not None else None) for key in calls}
+    pending = [(key, sub, repeat) for key, (sub, repeat) in calls.items() if payloads[key] is None]
     n_items = len({case.item_id for case in cases})
-    prompt_chars = sum(len(m["content"]) for _, _, _, msgs, _ in pending for m in msgs)
+    prompt_chars = sum(len(m["content"]) for _, sub, _ in pending for m in sub.messages)
+    guard_note = "" if not guards.is_active(guard) else f", guard {guards.describe(guard)}"
     log(
-        f"[judgeaudit] {n_items} items, {len(jobs)} judge calls: "
-        f"{len(jobs) - len(pending)} cached, {len(pending)} to run "
+        f"[judgeaudit] {n_items} items, {len(jobs)} verdicts, {len(calls)} judge calls{guard_note}: "
+        f"{len(calls) - len(pending)} cached, {len(pending)} to run "
         f"(~{prompt_chars // 4:,} prompt tokens)"
     )
     if dry_run:
         if cache is not None:
             cache.close()
-        return {"dry_run": True, "n_calls": len(jobs), "n_pending": len(pending)}
+        return {"dry_run": True, "n_verdicts": len(jobs), "n_calls": len(calls), "n_pending": len(pending)}
 
     errors: dict[str, str] = {}
     fresh: set[str] = set()
@@ -168,9 +190,9 @@ def run_audit(
         futures = {
             pool.submit(
                 call,
-                JudgeRequest(messages=msgs, mode=case.mode, schema=schema, repeat=rep, case=case),
+                JudgeRequest(messages=sub.messages, mode=sub.mode, schema=sub.schema, repeat=rep, case=sub.case),
             ): key
-            for key, case, rep, msgs, schema in pending
+            for key, sub, rep in pending
         }
         try:
             for done, future in enumerate(as_completed(futures), 1):
@@ -211,10 +233,13 @@ def run_audit(
     if cache is not None:
         cache.close()
 
-    rows = [
-        _row(case, repeat, payloads[key], cached=key not in fresh, error=errors.get(key))
-        for key, case, repeat, _, _ in jobs
-    ]
+    rows = []
+    for case, repeat, subs in jobs:
+        keys = [key for _, _, key in subs]
+        error = next((errors[k] for k in keys if k in errors), None)
+        rows.append(_row(case, repeat, subs, payloads, guard, cached=not any(k in fresh for k in keys), error=error))
+    calls_per_verdict = sum(len(subs) for _, _, subs in jobs) / len(jobs)
+    calls_per_s = round(len(fresh) / active_s, 3) if fresh and wall_s > 0 else None
     run_info = {
         "run_name": cfg["run_name"],
         "judgeaudit_version": __version__,
@@ -225,6 +250,9 @@ def run_audit(
         "reference": cfg["reference"],
         "prompt_style": style,
         "prompt_version": PROMPT_VERSION,
+        "guard": guard,
+        "guard_name": guards.describe(guard),
+        "calls_per_verdict": round(calls_per_verdict, 3),
         "repeats": int(cfg["repeats"]),
         "concurrency": int(cfg["concurrency"]),
         "judge": fingerprint,
@@ -234,7 +262,9 @@ def run_audit(
         "wall_s": round(wall_s, 3),
         "paused_s": round(gate.paused_s, 3),
         "pauses": gate.pauses,
-        "calls_per_s": round(len(fresh) / active_s, 3) if fresh and wall_s > 0 else None,
+        "calls_per_s": calls_per_s,
+        # what a deployment would get: judge calls per second / calls each verdict needs
+        "verdicts_per_s": round(calls_per_s / calls_per_verdict, 3) if calls_per_s else None,
         "use_cache": use_cache,
         "aborted": aborted,
         "meta": cfg.get("meta") or {},
@@ -249,8 +279,22 @@ def run_audit(
             and previous.get("concurrency") == run_info["concurrency"]
         ):
             run_info["calls_per_s"] = previous["calls_per_s"]
+            run_info["verdicts_per_s"] = round(previous["calls_per_s"] / calls_per_verdict, 3)
             run_info["throughput_from_earlier_run"] = True
+            # The hardware note belongs to the run that measured the speed (e.g. the
+            # GPU power limit at the time), not to this re-read from the cache.
+            for k, v in (previous.get("meta") or {}).items():
+                if k in ("gpu_power_limit_w", "vram_mib"):
+                    run_info["meta"][k] = v
     summary = compute_summary(rows, cfg["thresholds"], run_info, seed=int(cfg["bootstrap_seed"]))
+    if split == "all":
+        # The same run scored on each half of the suite: choose a configuration on
+        # "dev", report it on "heldout", with no extra judge calls.
+        summary["splits"] = {}
+        for name in sorted({row["split"] for row in rows}):
+            part = compute_summary([r for r in rows if r["split"] == name], cfg["thresholds"],
+                                   run_info, seed=int(cfg["bootstrap_seed"]))
+            summary["splits"][name] = {k: part[k] for k in ("verdict", "passed", "n_items", "metrics", "checks")}
 
     out_dir.mkdir(parents=True, exist_ok=True)
     with open(out_dir / "results.jsonl", "w", encoding="utf-8") as handle:

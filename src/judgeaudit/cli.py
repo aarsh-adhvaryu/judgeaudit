@@ -7,9 +7,11 @@ from pathlib import Path
 
 from . import __version__
 from .compare import write_comparison
+from .dashboard import build_dashboard
 from .config import load_config
 from .judges import JudgeError
 from .metrics import compute_summary
+from .recommend import write_recommendation
 from .report import write_reports
 from .runner import run_audit
 
@@ -55,6 +57,22 @@ def _cmd_compare(args) -> int:
     return 0
 
 
+def _cmd_recommend(args) -> int:
+    result = write_recommendation(args.runs_dir, args.out, include_mock=args.include_mock)
+    for ref, picked in result["chosen"].items():
+        c = picked["cheapest_trusted"] or picked["best"]
+        state = "passes every dev check" if picked["cheapest_trusted"] else "closest (no set-up passed every dev check)"
+        print(f"[judgeaudit] reference {ref}: {c['model']} / {c['prompt']} / guard {c['guard']} ({state})")
+    print(f"[judgeaudit] compared {len(result['candidates'])} set-ups: {Path(args.out) / 'recommendation.md'}")
+    return 0
+
+
+def _cmd_dashboard(args) -> int:
+    n = build_dashboard(args.runs_dir, args.out, include_mock=args.include_mock)
+    print(f"[judgeaudit] dashboard with {n} set-ups: {args.out}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="judgeaudit",
@@ -83,6 +101,18 @@ def main(argv: list[str] | None = None) -> int:
     compare.add_argument("--out", default="results", help="folder for comparison.md and comparison.csv")
     compare.add_argument("--include-mock", action="store_true")
     compare.set_defaults(func=_cmd_compare)
+
+    rec = sub.add_parser("recommend", help="pick the cheapest trustworthy set-up on dev, report it on held-out")
+    rec.add_argument("runs_dir", nargs="?", default="runs")
+    rec.add_argument("--out", default="results")
+    rec.add_argument("--include-mock", action="store_true")
+    rec.set_defaults(func=_cmd_recommend)
+
+    dash = sub.add_parser("dashboard", help="write a self-contained HTML dashboard of every audit")
+    dash.add_argument("runs_dir", nargs="?", default="runs")
+    dash.add_argument("--out", default="results/dashboard.html")
+    dash.add_argument("--include-mock", action="store_true")
+    dash.set_defaults(func=_cmd_dashboard)
 
     report = sub.add_parser("report", help="rebuild the card from a finished run, optionally with new thresholds")
     report.add_argument("run_dir")

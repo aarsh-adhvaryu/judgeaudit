@@ -68,5 +68,5 @@ def test_repeats_report_agreement(make_cfg):
     cfg = make_cfg(noise=0.3)
     cfg["repeats"] = 3
     s = run_audit(cfg, limit_items=10, log=quiet)
-    assert s["n_rows"] == 10 * 11 * 3
+    assert s["n_rows"] == 10 * 12 * 3
     assert 0.5 < value(s, "repeat_agreement") < 1.0

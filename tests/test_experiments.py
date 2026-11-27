@@ -30,10 +30,10 @@ def test_no_cache_always_calls_the_judge(make_cfg):
     judge = MockJudge(knowledge=1.0, noise=0.0)
     run_audit(cfg, judge=judge, use_cache=False, limit_items=5, log=quiet)
     second = run_audit(cfg, judge=judge, use_cache=False, limit_items=5, log=quiet)
-    assert judge.calls == 110
-    assert second["run"]["new_calls"] == 55 and second["run"]["use_cache"] is False
+    assert judge.calls == 120
+    assert second["run"]["new_calls"] == 60 and second["run"]["use_cache"] is False
     cached = run_audit(cfg, judge=judge, limit_items=5, log=quiet)
-    assert cached["run"]["new_calls"] == 55  # nothing was written to the cache above
+    assert cached["run"]["new_calls"] == 60  # nothing was written to the cache above
 
 
 def test_throughput_survives_a_fully_cached_rerun(make_cfg):
@@ -75,7 +75,7 @@ def test_pause_file_holds_new_calls_and_paused_time_is_not_counted_as_speed(make
     lines = []
     summary = run_audit(make_cfg(), judge=MockJudge(knowledge=1.0, noise=0.0), log=lines.append)
     run = summary["run"]
-    assert run["failed_calls"] == 0 and run["new_calls"] == 440
+    assert run["failed_calls"] == 0 and run["new_calls"] == 480
     assert run["pauses"] == 1 and 0.3 < run["paused_s"] <= run["wall_s"]
     assert run["calls_per_s"] > run["new_calls"] / run["wall_s"]   # the pause is not charged to the judge
     assert any("paused: GPU hotspot" in line for line in lines) and any("resumed" in line for line in lines)
@@ -90,7 +90,7 @@ def test_a_stale_pause_file_is_ignored(make_cfg, tmp_path, monkeypatch):
     os.utime(flag, (old, old))
     monkeypatch.setenv("JUDGEAUDIT_PAUSE_FILE", str(flag))
     run = run_audit(make_cfg(), judge=MockJudge(knowledge=1.0, noise=0.0), log=quiet)["run"]
-    assert run["new_calls"] == 440 and run["pauses"] == 0 and run["paused_s"] == 0
+    assert run["new_calls"] == 480 and run["pauses"] == 0 and run["paused_s"] == 0
 
 
 class DeadServerJudge(MockJudge):
@@ -116,9 +116,9 @@ def test_a_dead_server_stops_the_run_early_and_the_next_run_resumes(make_cfg):
     judge = DeadServerJudge(alive_for=100, knowledge=1.0, noise=0.0)
     first = run_audit(cfg, judge=judge, log=quiet)
     assert first["run"]["aborted"] is True
-    assert judge.calls < 300  # the breaker stopped it well short of all 440 calls
+    assert judge.calls < 300  # the breaker stopped it well short of all 480 calls
     assert first["run"]["new_calls"] >= 90
-    assert first["run"]["new_calls"] + first["run"]["failed_calls"] == 440
+    assert first["run"]["new_calls"] + first["run"]["failed_calls"] == 480
     assert first["verdict"].startswith("INCOMPLETE") or "run incomplete" in first["verdict"]
     assert first["passed"] is False
 
@@ -126,7 +126,7 @@ def test_a_dead_server_stops_the_run_early_and_the_next_run_resumes(make_cfg):
     second = run_audit(cfg, judge=judge, log=quiet)
     assert second["run"]["aborted"] is False and second["run"]["failed_calls"] == 0
     assert second["run"]["cached_calls"] == first["run"]["new_calls"]
-    assert second["passed"] and second["n_rows"] == 440
+    assert second["passed"] and second["n_rows"] == 480
 
 
 def test_cli_exit_code_3_when_the_server_is_unreachable(tmp_path, make_cfg):

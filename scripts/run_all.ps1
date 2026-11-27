@@ -27,6 +27,19 @@ Everything printed here is also kept in logs\run_all-<start>.log.
 -GpuPowerLimit 80 caps the GPU at 80 W for this boot (needs an administrator
 PowerShell and a driver that allows it; the script reports whether it took effect).
 
+-GpuClockLimit 2100 locks the GPU's core clock at or below 2100 MHz for the run and
+releases it at the end (administrator PowerShell). This is the way to use the
+laptop's Performance mode, with its faster fans, without the 140 W peaks that made
+the GPU overheat: the power-mode gate is then skipped and the clock cap does its job.
+
+For every model the script runs a grid of configurations, each scored on the dev
+and held-out halves of the suite in the same run:
+  prompt    naive (plain only), hardened, guarded
+  reference none, given
+  guard     plain, swap-regex, swap-llm, swap-both, swap-both-abstain
+Most configurations re-use judge calls already made, so the grid costs about four
+audits of fresh calls per model.
+
   powershell -ExecutionPolicy Bypass -File scripts\run_all.ps1
   powershell -ExecutionPolicy Bypass -File scripts\run_all.ps1 -Only llama31-8b-q4
   powershell -ExecutionPolicy Bypass -File scripts\run_all.ps1 -DownloadOnly
@@ -45,6 +58,7 @@ param(
     [int]$PauseHeadroom = 8,
     [int]$MaxGpuWatts = 100,
     [int]$GpuPowerLimit = 0,
+    [int]$GpuClockLimit = 0,
     [switch]$DownloadOnly
 )
 
@@ -68,6 +82,13 @@ if (-not (Test-Path $Py)) { Write-Host "[run_all] .venv not found. Run: python -
 if (-not (Test-Path $LlamaServer)) { Write-Host "[run_all] llama-server not found at $LlamaServer (pass -LlamaServer <path>)"; exit 1 }
 New-Item -ItemType Directory -Force $ModelsDir, $LogDir, (Join-Path $Root "results") | Out-Null
 try { Start-Transcript -Path (Join-Path $LogDir "run_all-$RunStamp.log") | Out-Null } catch { }
+
+$Guards = @(
+    @{ Name = "swap-regex"; Sets = @("guard.swap=true", "guard.screen=regex") },
+    @{ Name = "swap-llm"; Sets = @("guard.swap=true", "guard.screen=llm") },
+    @{ Name = "swap-both"; Sets = @("guard.swap=true", "guard.screen=both") },
+    @{ Name = "swap-both-abstain"; Sets = @("guard.swap=true", "guard.screen=both", "guard.on_flag=abstain") }
+)
 
 $HF = "https://huggingface.co"
 $Models = @(
@@ -265,6 +286,8 @@ function Invoke-Audit([string]$runName, [string[]]$sets, [string[]]$more, [strin
 
 function Update-Results {
     & $Py -m judgeaudit compare runs --out results | Out-Host
+    & $Py -m judgeaudit recommend runs --out results | Out-Host
+    & $Py -m judgeaudit dashboard runs --out results\dashboard.html | Out-Host
     $cards = Join-Path $Root "results\cards"
     New-Item -ItemType Directory -Force $cards | Out-Null
     Get-ChildItem (Join-Path $Root "runs") -Directory -ErrorAction SilentlyContinue | ForEach-Object {
@@ -292,13 +315,15 @@ if ($DownloadOnly) {
     exit 0
 }
 
-# The first hand-made run is the same experiment as llama31-8b-q4--hardened-none; keep it out of the tables.
-$old = Join-Path $Root "runs\llama31-8b-q4"
-if (Test-Path $old) {
-    $archive = Join-Path $Root "runs\_archive"
-    New-Item -ItemType Directory -Force $archive | Out-Null
-    if (-not (Test-Path (Join-Path $archive "llama31-8b-q4"))) { Move-Item $old $archive }
-}
+# Audits on the 40-item seed suite (26 Nov) are kept in runs\_archive\v0; their judge
+# calls stay in the cache, so the 100-item suite re-uses them for its first 40 items.
+$archive = Join-Path $Root "runs\_archive\v0"
+Get-ChildItem (Join-Path $Root "runs") -Directory -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -notmatch '^(_archive|smoke|bench-)' -and $_.Name -notmatch '--(plain|swap-)' } |
+    ForEach-Object {
+        New-Item -ItemType Directory -Force $archive | Out-Null
+        if (-not (Test-Path (Join-Path $archive $_.Name))) { Move-Item $_.FullName $archive }
+    }
 
 $drive = (Split-Path -Qualifier $Root).TrimEnd(":")
 $freeGb = [math]::Round((Get-PSDrive -Name $drive).Free / 1GB, 1)
@@ -309,6 +334,16 @@ if (Get-Process -Name "llama-server" -ErrorAction SilentlyContinue) { Say "stopp
 Stop-Server
 if ($GpuPowerLimit -gt 0) {
     & nvidia-smi -pl $GpuPowerLimit | Out-Host
+}
+if ($GpuClockLimit -gt 0) {
+    & nvidia-smi -lgc "0,$GpuClockLimit" | Out-Host
+    if ($LASTEXITCODE -eq 0) {
+        Say "GPU core clock locked at or below $GpuClockLimit MHz for this run; the power-mode gate is off"
+        $MaxGpuWatts = 1000
+    } else {
+        Say "could not lock the GPU clock (needs an administrator PowerShell, and not every laptop driver allows it); the power-mode gate stays at $MaxGpuWatts W"
+        $GpuClockLimit = 0
+    }
 }
 # Speeds depend on the power the GPU may draw (laptop performance mode or -GpuPowerLimit): it is recorded with every model.
 $GpuWatts = Get-GpuWatts
@@ -330,11 +365,19 @@ try {
         if (-not (Start-Server $path 4 $m.Name)) { Say "skipping $($m.Name): server failed to start"; continue }
         $vram = Get-Vram
         Say "server ready, GPU memory in use: $vram MiB"
-        $base = @("judge.label=$($m.Label)", "concurrency=4", "meta.model=$($m.Name)", "meta.model_gb=$sizeGb", "meta.vram_mib=$vram", "meta.parallel=4", "meta.gpu_power_limit_w=$(Get-GpuWatts)") + @($m.Sets)
+        $base = @("judge.label=$($m.Label)", "concurrency=4", "meta.model=$($m.Name)", "meta.model_gb=$sizeGb", "meta.vram_mib=$vram", "meta.parallel=4", "meta.gpu_power_limit_w=$(Get-GpuWatts)", "meta.gpu_clock_limit_mhz=$GpuClockLimit") + @($m.Sets)
 
-        foreach ($style in @("hardened", "naive")) {
+        # Plain judges first: every guarded configuration after them re-uses their calls.
+        foreach ($style in @("hardened", "naive", "guarded")) {
             foreach ($ref in @("none", "given")) {
-                Invoke-Audit "$($m.Name)--$style-$ref" ($base + @("prompt_style=$style", "reference=$ref")) @() $path 4 $m.Name
+                Invoke-Audit "$($m.Name)--$style-$ref--plain" ($base + @("prompt_style=$style", "reference=$ref")) @() $path 4 $m.Name
+            }
+        }
+        foreach ($style in @("hardened", "guarded")) {
+            foreach ($ref in @("none", "given")) {
+                foreach ($g in $Guards) {
+                    Invoke-Audit "$($m.Name)--$style-$ref--$($g.Name)" ($base + @("prompt_style=$style", "reference=$ref") + $g.Sets) @() $path 4 $m.Name
+                }
             }
         }
 
@@ -366,6 +409,7 @@ try {
     Stop-Server
     Stop-Guard
     Remove-Item $PauseFile -ErrorAction SilentlyContinue
+    if ($GpuClockLimit -gt 0) { & nvidia-smi -rgc | Out-Null; Say "GPU clock lock released" }
 }
 
 Update-Results

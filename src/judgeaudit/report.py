@@ -15,8 +15,14 @@ SECTIONS = [
         "Position and length preference in pairwise mode",
         ("position_inconsistency", "first_position_rate", "verbosity_preference"),
     ),
+    ("Defences: withheld verdicts and the injection screen", ("abstain_rate", "answered_accuracy", "screen.")),
     ("Output robustness", ("parse_failure_rate", "repeat_agreement")),
 ]
+
+
+def guard_line(run: dict) -> str:
+    name = run.get("guard_name") or "none"
+    return f"guard `{name}` ({run.get('calls_per_verdict', 1):g} judge calls per verdict)"
 
 
 def fmt(name: str, value: float | None) -> str:
@@ -76,7 +82,10 @@ def _perf_lines(summary: dict) -> list[tuple[str, str]]:
     ]
     if run.get("calls_per_s"):
         label = "Throughput (measured in an earlier run)" if run.get("throughput_from_earlier_run") else "Throughput (new calls)"
-        lines.append((label, f"{run['calls_per_s']:.2f} verdicts/s at concurrency {run['concurrency']}"))
+        per = run.get("calls_per_verdict", 1)
+        verdicts = run.get("verdicts_per_s") or run["calls_per_s"] / per
+        lines.append((label, f"{run['calls_per_s']:.2f} judge calls/s at concurrency {run['concurrency']}; "
+                             f"{per:g} calls per verdict, so {verdicts:.2f} verdicts/s"))
     if "latency_mean_s" in perf:
         lines.append(
             ("Latency per verdict", f"mean {perf['latency_mean_s'] * 1000:.0f} ms, p50 {perf['latency_p50_s'] * 1000:.0f} ms, p95 {perf['latency_p95_s'] * 1000:.0f} ms")
@@ -104,7 +113,7 @@ def render_markdown(summary: dict) -> str:
     out += [
         f"Suite `{run['suite']}` ({run['suite_sha256']}), split `{run['split']}`, "
         f"{summary['n_items']} items, {summary['n_rows']} verdicts, "
-        f"prompt `{run['prompt_style']}/{run['prompt_version']}`, reference `{run['reference']}`.",
+        f"prompt `{run['prompt_style']}/{run['prompt_version']}`, reference `{run['reference']}`, {guard_line(run)}.",
         "",
     ]
     for title, prefixes in SECTIONS:
@@ -155,7 +164,7 @@ def render_html(summary: dict) -> str:
         f"<h1>Judge reliability card: {e(run['run_name'])}</h1>",
         f"<p class='meta'>Suite {e(run['suite'])} ({e(run['suite_sha256'])}) · split {e(run['split'])} · "
         f"{summary['n_items']} items · {summary['n_rows']} verdicts · prompt {e(run['prompt_style'])}/{e(run['prompt_version'])} · "
-        f"reference {e(run['reference'])}</p>",
+        f"reference {e(run['reference'])} · {e(guard_line(run).replace('`', ''))}</p>",
         f"<p class='verdict {state}'>{e(summary['verdict'])}</p>",
     ]
     failures = _failures(summary)

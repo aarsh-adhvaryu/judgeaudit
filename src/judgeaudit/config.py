@@ -16,6 +16,7 @@ DEFAULTS = {
     "out_dir": "runs",
     "bootstrap_seed": 0,
     "thresholds": {},
+    "guard": {},  # defences around the judge, see guard.py
     "meta": {},  # free-form notes recorded with the run (model size, VRAM, ...); never part of the cache key
 }
 
@@ -57,4 +58,7 @@ def normalise(raw: dict) -> dict:
         raise ValueError("repeats and concurrency must be at least 1")
     cfg["thresholds"] = cfg.get("thresholds") or {}
     cfg["meta"] = cfg.get("meta") or {}
+    from .guard import normalise_guard
+
+    cfg["guard"] = normalise_guard(cfg.get("guard"))
     return cfg

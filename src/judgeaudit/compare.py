@@ -11,14 +11,25 @@ RELIABILITY = [
     ("pointwise_accuracy", "Accuracy"),
     ("pair_accuracy", "Pair accuracy"),
     ("flip_to_accept.injection", "Injection accepted"),
+    ("flip_to_accept.injection_unseen", "Unseen injection accepted"),
     ("flip_to_accept.authority", "Authority accepted"),
     ("flip_to_accept.fluent", "Fluent accepted"),
     ("flip_to_accept.padded", "Padded wrong accepted"),
     ("flip_to_reject.padded", "Padded correct rejected"),
     ("position_inconsistency_cw", "Position flips"),
+    ("abstain_rate", "Withheld"),
+    ("screen.flag_rate_correct", "Screen false alarms"),
     ("parse_failure_rate", "Parse failures"),
     ("repeat_agreement", "Repeat agreement"),
 ]
+
+
+def verdicts_per_s(run: dict) -> float | None:
+    if run.get("verdicts_per_s"):
+        return run["verdicts_per_s"]
+    if run.get("calls_per_s"):
+        return run["calls_per_s"] / run.get("calls_per_verdict", 1)
+    return None
 
 
 def load_runs(runs_dir: str | Path, include_mock: bool = False) -> list[dict]:
@@ -60,11 +71,11 @@ def render_comparison(runs: list[dict]) -> str:
     for r in runs:
         run = r["run"]
         rows.append(
-            [f"`{r['dir']}`", run["prompt_style"], run["reference"], r["n_items"], _status(r)]
+            [f"`{r['dir']}`", run["prompt_style"], run["reference"], run.get("guard_name", "none"), r["n_items"], _status(r)]
             + [fmt(n, r["metrics"][n]["value"]) if n in r["metrics"] else "" for n in names]
         )
     out += ["## Reliability", ""]
-    out += _table(["Run", "Prompt", "Reference", "Items", "Checks"] + [labels[n] for n in names], rows)
+    out += _table(["Run", "Prompt", "Reference", "Guard", "Items", "Checks"] + [labels[n] for n in names], rows)
 
     rows = []
     for r in runs:
@@ -74,9 +85,11 @@ def render_comparison(runs: list[dict]) -> str:
                 f"`{r['dir']}`",
                 _num(meta.get("model_gb"), "{:.2f}"),
                 _num(meta.get("vram_mib"), "{:.0f}"),
+                _num(meta.get("gpu_power_limit_w"), "{:.0f}"),
                 run["concurrency"],
                 "no" if run.get("use_cache") is False else "yes",
-                _num(run.get("calls_per_s"), "{:.2f}"),
+                _num(run.get("calls_per_verdict", 1), "{:g}"),
+                _num(verdicts_per_s(run), "{:.2f}"),
                 _num(perf.get("latency_p50_s") and perf["latency_p50_s"] * 1000, "{:.0f}"),
                 _num(perf.get("latency_p95_s") and perf["latency_p95_s"] * 1000, "{:.0f}"),
                 _num(perf.get("prompt_tokens_mean"), "{:.0f}"),
@@ -86,14 +99,15 @@ def render_comparison(runs: list[dict]) -> str:
         )
     out += ["", "## Cost and speed", ""]
     out += _table(
-        ["Run", "Model GB", "VRAM used MiB", "Concurrency", "Verdict cache", "Verdicts/s",
+        ["Run", "Model GB", "VRAM used MiB", "GPU W", "Concurrency", "Verdict cache", "Calls/verdict", "Verdicts/s",
          "p50 ms", "p95 ms", "Prompt tokens", "Prefill tok/s", "Decode tok/s"],
         rows,
     )
     out += [
         "",
-        "Verdicts/s is measured on calls that really ran. VRAM is the whole GPU's used memory "
-        "after the model loaded, so it includes other applications.",
+        "Verdicts/s is measured on calls that really ran, divided by the judge calls each verdict "
+        "needs. GPU W is the power limit the laptop allowed while it was measured. VRAM is the "
+        "whole GPU's used memory after the model loaded, so it includes other applications.",
         "",
     ]
     return "\n".join(out)
@@ -110,8 +124,8 @@ def write_comparison(runs_dir: str | Path, out_dir: str | Path, include_mock: bo
     meta_names = sorted({name for r in runs for name in (r["run"].get("meta") or {})})
     with open(out_dir / "comparison.csv", "w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
-        header = ["run", "label", "prompt_style", "reference", "split", "repeats", "concurrency",
-                  "n_items", "status", "calls_per_s", "use_cache"]
+        header = ["run", "label", "prompt_style", "reference", "guard", "split", "repeats", "concurrency",
+                  "n_items", "status", "calls_per_s", "calls_per_verdict", "verdicts_per_s", "use_cache"]
         header += [f"meta.{n}" for n in meta_names] + [f"perf.{n}" for n in perf_names]
         for name in metric_names:
             header += [name, f"{name}.ci_low", f"{name}.ci_high"]
@@ -119,8 +133,9 @@ def write_comparison(runs_dir: str | Path, out_dir: str | Path, include_mock: bo
         for r in runs:
             run, meta = r["run"], r["run"].get("meta") or {}
             row = [r["dir"], run["judge"].get("label", ""), run["prompt_style"], run["reference"],
-                   run["split"], run["repeats"], run["concurrency"], r["n_items"], _status(r),
-                   run.get("calls_per_s"), run.get("use_cache", True)]
+                   run.get("guard_name", "none"), run["split"], run["repeats"], run["concurrency"], r["n_items"],
+                   _status(r), run.get("calls_per_s"), run.get("calls_per_verdict", 1), verdicts_per_s(run),
+                   run.get("use_cache", True)]
             row += [meta.get(n, "") for n in meta_names] + [r["perf"].get(n, "") for n in perf_names]
             for name in metric_names:
                 m = r["metrics"].get(name)

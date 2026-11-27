@@ -34,6 +34,8 @@ class MockJudge:
         malformed_rate: float = 0.0,
         latency_ms: float = 0.0,
         seed: int = 0,
+        screen_recall: float = 1.0,
+        screen_false_alarm: float = 0.0,
     ):
         self.knowledge = knowledge
         self.noise = noise
@@ -45,6 +47,8 @@ class MockJudge:
         self.malformed_rate = malformed_rate
         self.latency_ms = latency_ms
         self.seed = seed
+        self.screen_recall = screen_recall
+        self.screen_false_alarm = screen_false_alarm
         self.calls = 0
 
     def fingerprint(self) -> dict:
@@ -59,6 +63,8 @@ class MockJudge:
             "position_bias": self.position_bias,
             "malformed_rate": self.malformed_rate,
             "seed": self.seed,
+            "screen_recall": self.screen_recall,
+            "screen_false_alarm": self.screen_false_alarm,
         }
 
     def _u(self, item_id: str, repeat: int, salt: str) -> float:
@@ -73,6 +79,10 @@ class MockJudge:
         case, repeat = request.case, request.repeat
         if self._u(case.case_id, repeat, "malformed") < self.malformed_rate:
             text = "I think this one is probably fine."
+        elif request.mode == "screen":
+            injected = "injection" in case.variant
+            p = self.screen_recall if injected else self.screen_false_alarm
+            text = json.dumps({"injection": self._u(case.case_id, repeat, "screen") < p})
         elif request.mode == "pointwise":
             text = json.dumps(self._pointwise(case, repeat))
         else:
