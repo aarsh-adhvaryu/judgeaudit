@@ -10,7 +10,7 @@ import html
 import json
 from pathlib import Path
 
-from .recommend import KEY_METRICS, USE_CASES, candidates, choose
+from .recommend import KEY_METRICS, USE_CASES, candidates, choose, speed
 
 PALETTE = ["#4269d0", "#efb118", "#ff725c", "#6cc5b0", "#a463f2", "#97bbf5", "#9c6b4e", "#3ca951"]
 
@@ -35,9 +35,10 @@ def _codes(rows: list[dict], order: list[str]) -> tuple[str, str]:
 def _scatter(points: list[dict], models: list[str], title: str) -> str:
     w, h, left, bottom, top, right = 460, 300, 52, 40, 28, 16
     xs = [p["x"] for p in points if p["x"]] or [1]
-    x_max = max(xs) * 1.08
-    y_min = min([p["y"] for p in points] + [0.6])
-    y_min = max(0.0, (int(y_min * 20) / 20))
+    x_step = next(step for step in (1, 2, 5, 10, 20, 50, 100, 200, 500) if max(xs) / step <= 6)
+    x_max = x_step * (int(max(xs) * 1.04 / x_step) + 1)
+    y_min = max(0.0, int(min([p["y"] for p in points] + [0.6]) * 10) / 10)
+    y_steps = round((1 - y_min) / 0.1)
 
     def sx(v):
         return left + (w - left - right) * (v / x_max)
@@ -47,12 +48,12 @@ def _scatter(points: list[dict], models: list[str], title: str) -> str:
 
     parts = [f"<svg viewBox='0 0 {w} {h}' role='img' aria-label='{html.escape(title)}'>",
              f"<text x='{left}' y='16' class='ct'>{html.escape(title)}</text>"]
-    for i in range(6):
-        y = y_min + (1 - y_min) * i / 5
+    for i in range(y_steps + 1):
+        y = y_min + 0.1 * i
         parts.append(f"<line x1='{left}' x2='{w - right}' y1='{sy(y):.1f}' y2='{sy(y):.1f}' class='grid'/>"
                      f"<text x='{left - 6}' y='{sy(y) + 4:.1f}' class='tick' text-anchor='end'>{100 * y:.0f}%</text>")
-    for i in range(5):
-        x = x_max * i / 4
+    for i in range(int(round(x_max / x_step)) + 1):
+        x = x_step * i
         parts.append(f"<text x='{sx(x):.1f}' y='{h - bottom + 16}' class='tick' text-anchor='middle'>{x:.0f}</text>")
     parts.append(f"<text x='{(w + left) / 2}' y='{h - 6}' class='tick' text-anchor='middle'>verdicts per second (higher is cheaper)</text>")
     for p in points:
@@ -194,7 +195,7 @@ def build_dashboard(runs_dir: str | Path, out_path: str | Path, include_mock: bo
         if pick:
             acc = pick["heldout"].get("pointwise_accuracy") or {}
             parts.append(f"<p class='big'>{e(pick['model'])} · {e(pick['prompt'])} prompt · guard {e(pick['guard'])}</p>"
-                         f"<p>{pick['verdicts_per_s']:.1f} verdicts/s, {pick['calls_per_verdict']:g} calls per verdict. "
+                         f"<p>{speed(pick)} verdicts/s, {pick['calls_per_verdict']:g} calls per verdict. "
                          f"Held-out accuracy {100 * (acc.get('value') or 0):.1f}%; "
                          + ("passed every held-out check." if pick["heldout_passed"] else "held-out failures: " + e(", ".join(pick["heldout_failed"])))
                          + "</p>")
@@ -207,7 +208,9 @@ def build_dashboard(runs_dir: str | Path, out_path: str | Path, include_mock: bo
     parts.append("<h2>Trust against cost</h2><div class='legend'>")
     for i, m in enumerate(models):
         parts.append(f"<span><i class='dot' style='background:{PALETTE[i % len(PALETTE)]}'></i>{e(m)}</span>")
-    parts.append("<span>hollow = plain judge, filled = guarded, ringed = passed every dev check</span></div><div class='charts'>")
+    parts.append("<span>hollow = plain judge, filled = guarded, ringed = passed every dev check</span></div>"
+                 "<p class='muted'>Up is more accurate, right is cheaper. Hover a point for its set-up. A withheld verdict counts "
+                 "as wrong, so set-ups that send many cases to a human (the abstain guard) sit low.</p><div class='charts'>")
     for ref, title in USE_CASES:
         pts = [{"x": c["verdicts_per_s"], "y": (c["heldout"].get("pointwise_accuracy") or {}).get("value") or 0,
                 "model": c["model"], "prompt": c["prompt"], "guard": c["guard"], "guarded": c["guard"] != "none",

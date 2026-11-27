@@ -17,6 +17,9 @@ on `heldout`. See README.md for the design.
   locked, add `-p no:cacheprovider --basetemp=<scratch dir>`.
 - Judge: llama.cpp `llama-server` at `D:\llama.cpp\llama-server.exe` (b12752,
   CUDA 13.5), port 8080, GGUF models in `models\`.
+- Experiment grid: `scripts\run_all.ps1` on this Windows laptop (power and heat
+  protection), `scripts/run_grid.py` anywhere else (Linux, Colab; `--mock` needs
+  no GPU). Colab notebook: `notebooks/colab_quickstart.ipynb`.
 - Long GPU jobs: give the user the command and let them run it in their own
   window (`powershell -ExecutionPolicy Bypass -File scripts\run_all.ps1`). Do not
   run them as a child of the Claude session. Short smoke tests (a few dozen

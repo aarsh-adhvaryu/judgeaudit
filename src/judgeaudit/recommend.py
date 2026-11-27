@@ -40,7 +40,7 @@ def _model_speed(runs: list[dict]) -> dict:
     for r in runs:
         run = r["run"]
         model = (run.get("meta") or {}).get("model")
-        if model and run.get("calls_per_s") and run.get("new_calls", 0) >= 100 and not run.get("throughput_from_earlier_run"):
+        if model and run.get("calls_per_s") and run.get("new_calls", 0) >= 20 and not run.get("throughput_from_earlier_run"):
             rates[model].append(run["calls_per_s"])
     return {model: statistics.median(values) for model, values in rates.items()}
 
@@ -122,6 +122,10 @@ def choose(cands: list[dict]) -> dict:
     return result
 
 
+def speed(c: dict) -> str:
+    return "n/a" if c.get("verdicts_per_s") is None else f"{c['verdicts_per_s']:.1f}"
+
+
 def _cell(c: dict, name: str) -> str:
     m = c["heldout"].get(name)
     if not m:
@@ -149,7 +153,7 @@ def render(cands: list[dict], chosen: dict) -> str:
         out += [f"## {title}", ""]
         if cheap:
             out.append(f"**Use {_setup(cheap)}.** It is the fastest set-up that passed every check on dev "
-                       f"({cheap['verdicts_per_s']:.1f} verdicts/s, {cheap['calls_per_verdict']:g} judge calls per verdict, "
+                       f"({speed(cheap)} verdicts/s, {cheap['calls_per_verdict']:g} judge calls per verdict, "
                        f"{cheap['vram_mib']} MiB VRAM in use).")
             held = "passed every check" if cheap["heldout_passed"] else "failed " + ", ".join(cheap["heldout_failed"])
             out.append(f"On held-out items it {held}.")

@@ -10,3 +10,5 @@ models/
 runs/
 logs/
 *.part
+runs-mock/
+results-mock/

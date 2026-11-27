@@ -53,42 +53,131 @@ wrong ones. No defence here fixes either, so this case needs a human.
 | Decoding barely matters | repeat agreement 99.7% greedy, 99.8% at temperature 0.7 |
 | Prefix cache and batching | 7.3 to 11.3 verdicts/s with prefix reuse; 5.8, 7.9, 10.9, 13.3 verdicts/s at 1, 2, 4, 8 slots |
 
-## Quickstart (Windows PowerShell)
+## Run it
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/aarsh-adhvaryu/judgeaudit/blob/main/notebooks/colab_quickstart.ipynb)
+
+Pick the path that matches your machine. All of them end with the same three
+files in `results/`: `recommendation.md`, `comparison.md` and `dashboard.html`.
+
+| Path | Needs | Time | What you get |
+|---|---|---|---|
+| A. No GPU | Python 3.10+ | 2 min | The whole pipeline against two mock judges with planted biases |
+| B. Google Colab | A Google account | 30 to 50 min | One real judge (Llama 3.1 8B, 4-bit), 8 set-ups, on a free T4 |
+| C. Linux with an NVIDIA GPU | CUDA toolkit, CMake, about 10 GB VRAM | 20 min to several hours | Any or all of the 5 judges, 8 or 44 set-ups each |
+| D. Windows with an NVIDIA GPU | PowerShell | 1 to 2 hours | The full published experiment, with laptop power and heat protection |
+
+Times for B and C are estimates for a T4 or a laptop GPU; a fresh machine has
+no verdict cache, so every judge call is made once.
+
+### A. No GPU
+
+```bash
+git clone https://github.com/aarsh-adhvaryu/judgeaudit.git
+cd judgeaudit
+python -m venv .venv
+source .venv/bin/activate            # Windows: .venv\Scripts\Activate.ps1
+pip install -e ".[dev]"
+pytest -q                            # 61 tests
+python scripts/run_grid.py --mock --quick
+```
+
+Open `results-mock/dashboard.html` in a browser. The mock judges' numbers
+describe the planted biases, not any real model; this path checks the install
+and shows what every output looks like.
+
+### B. Google Colab
+
+Click the badge above, or open `notebooks/colab_quickstart.ipynb` in Colab, set
+Runtime > Change runtime type > T4 GPU, and run the cells in order. The notebook
+installs judgeaudit, builds `llama-server` with CUDA, downloads the model, runs
+the quick grid, and shows the recommendation and the dashboard inline. Set
+`LIMIT_ITEMS = 20` in the run cell for a 5 to 10 minute demo.
+
+### C. Linux with an NVIDIA GPU
+
+Build `llama-server` with CUDA (the published results used llama.cpp `b12752`):
+
+```bash
+git clone --depth 1 --branch b12752 https://github.com/ggml-org/llama.cpp
+cmake -S llama.cpp -B llama.cpp/build -DGGML_CUDA=ON -DLLAMA_CURL=OFF -DCMAKE_BUILD_TYPE=Release
+cmake --build llama.cpp/build --config Release -j 8 --target llama-server
+```
+
+Add `-DCMAKE_CUDA_ARCHITECTURES=89` (your GPU's compute capability without the
+dot, from `nvidia-smi --query-gpu=compute_cap --format=csv`) to compile only for
+your card, which is much faster. Then, from the judgeaudit folder:
+
+```bash
+# one model, 8 set-ups
+python scripts/run_grid.py --server llama.cpp/build/bin/llama-server --models llama31-8b-q4 --quick
+
+# the full published grid: 5 models x 44 set-ups, plus the speed measurements
+python scripts/run_grid.py --server llama.cpp/build/bin/llama-server --bench
+```
+
+Models (`--models`, comma-separated): `llama31-8b-q4`, `llama32-3b-q4`,
+`llama31-8b-q8`, `qwen3-8b-q4`, `qwen3-8b-q8`. They are downloaded from Hugging
+Face into `models/` (2 to 9 GB each; about 30 GB for all five). The 8-bit models
+need about 10 GB of VRAM. Stop with Ctrl+C at any time; running the same
+command again resumes from the verdict cache.
+
+### D. Windows with an NVIDIA GPU
+
+Install the CUDA build of llama.cpp for Windows from the
+[llama.cpp releases](https://github.com/ggml-org/llama.cpp/releases) (the
+`bin-win-cuda` zip and the matching `cudart` zip, unpacked into one folder),
+then in PowerShell:
 
 ```powershell
+git clone https://github.com/aarsh-adhvaryu/judgeaudit.git
+cd judgeaudit
 python -m venv .venv
 .venv\Scripts\Activate.ps1
 pip install -e ".[dev]"
-pytest -q                                  # no GPU needed
-judgeaudit run -c configs/smoke.yaml       # mock judge with planted biases
-start runs\smoke\report.html
+powershell -ExecutionPolicy Bypass -File scripts\run_all.ps1 -DownloadOnly     # models first
+powershell -ExecutionPolicy Bypass -File scripts\run_all.ps1 -LlamaServer C:\path\to\llama-server.exe
 ```
 
-The smoke run uses a mock judge with biases planted on purpose, so its card
-fails. Its numbers describe the mock and are not findings about any real model.
+On a gaming laptop, run it from an administrator PowerShell and add
+`-GpuClockLimit 2100`: see [Running every experiment on a Windows laptop](#running-every-experiment-on-a-windows-laptop).
+`scripts/run_grid.py` also works on Windows if you do not need the laptop
+protections.
 
-## Auditing a real local judge
+### Auditing your own judge
 
-1. Get a llama.cpp build for Windows with CUDA from the llama.cpp releases page,
-   and a GGUF instruct model (a 4-bit 8B model fits in 12 GB of VRAM).
-2. Start the server:
+Any OpenAI-compatible endpoint works (llama-server, Ollama, vLLM, hosted APIs).
+Copy `configs/local_llamacpp.yaml`, set `judge.base_url`, `judge.model` and a
+`judge.label` that names the model and quantization (it is part of the cache
+key), and, for hosted APIs, `judge.api_key_env`. Then:
 
-   ```powershell
-   .\llama-server.exe -m models\YOUR-MODEL.gguf -ngl 99 -c 8192 --parallel 4 --port 8080
-   ```
+```bash
+judgeaudit run -c my_judge.yaml --dry-run                                     # count calls first
+judgeaudit run -c my_judge.yaml                                               # plain judge
+judgeaudit run -c my_judge.yaml --run-name guarded --set guard.swap=true --set guard.screen=regex
+judgeaudit recommend runs --out results && judgeaudit dashboard runs --out results/dashboard.html
+```
 
-3. Set `judge.label` in `configs/local_llamacpp.yaml` to the model and
-   quantization you loaded. The label is part of the cache key.
-4. Run:
+To audit your own judge prompt rather than the built-in ones, add it as a
+prompt style in `src/judgeaudit/prompts.py`.
 
-   ```powershell
-   judgeaudit run -c configs/local_llamacpp.yaml --dry-run   # count calls first
-   judgeaudit run -c configs/local_llamacpp.yaml
-   judgeaudit run -c configs/local_llamacpp.yaml --set guard.swap=true --set guard.screen=both
-   ```
+## The dashboard
 
-Any OpenAI-compatible endpoint works (llama-server, Ollama, hosted providers):
-change `base_url`, `model` and, for hosted APIs, `api_key_env`.
+`results/dashboard.html` is one self-contained file: open it in any browser, no
+server or internet needed. Download it from this repository and double-click it
+to see the published results. Every number on it comes from the held-out half of
+the suite.
+
+| Part | What it shows | How to read it |
+|---|---|---|
+| Which set-up to use | For each use case (reference answer available or not), the fastest set-up that passed every check on the dev half, with its held-out accuracy and failures | If it says no set-up passed, the honest answer is to keep a human in the loop for that case |
+| Trust against cost | One point per set-up: held-out accuracy (up) against verdicts per second (right). Colour = model; hollow = plain judge, filled = guarded; a ring = passed every dev check. Hover a point for its details | The best set-ups sit top right. Points low down usually withhold many verdicts, which count as wrong |
+| Every set-up | All set-ups with their held-out metrics; green cells pass the threshold, red cells fail it. Filter by reference and model, click a header to sort | Read across a row to see which failure mode a set-up still has |
+| Where the judge was fooled | For any set-up, every case where the verdict disagreed with ground truth: the question, the exact answer the judge saw, what it said, what was expected, and whether the screen flagged it. Filter by variant | This is the demo: pick a plain judge and the injection variant to watch it obey an instruction hidden in a wrong answer, then pick the guarded set-up |
+
+`results/recommendation.md` is the same recommendation as text, with 95%
+intervals; `results/comparison.md` and `comparison.csv` hold every metric for
+every run; `results/cards/` has one reliability card per run.
 
 ## Commands
 
@@ -103,7 +192,7 @@ change `base_url`, `model` and, for hosted APIs, `api_key_env`.
 | `... --no-cache` | Neither read nor write the verdict cache, for speed measurements |
 | `judgeaudit compare runs --out results` | All runs side by side (`comparison.md`, `comparison.csv`) |
 | `judgeaudit recommend runs --out results` | Cheapest trustworthy set-up per use case (`recommendation.md`) |
-| `judgeaudit dashboard runs --out results/dashboard.html` | One self-contained page: recommendation, trust-against-cost chart, every set-up, and a browser of the cases that fooled each judge |
+| `judgeaudit dashboard runs --out results/dashboard.html` | One self-contained page: recommendation, trust-against-cost chart, every set-up, and a browser of the cases that fooled each judge (see [The dashboard](#the-dashboard)) |
 | `judgeaudit report RUN_DIR [-c CONFIG]` | Rebuild a card, optionally with new thresholds |
 
 Each run writes `report.html`, `report.md`, `summary.json` (with separate
@@ -113,11 +202,12 @@ Each run writes `report.html`, `report.md`, `summary.json` (with separate
 ## The guard
 
 ```yaml
-prompt_style: guarded   # naive | hardened | guarded
+prompt_style: guarded_v2   # naive | hardened | guarded | guarded_v2
 guard:
-  swap: true            # pairwise: ask in both orders, withhold the pick when they disagree
-  screen: both          # none | regex | llm | both: check each answer for text aimed at the grader
-  on_flag: reject       # reject | abstain: what a flagged answer gets
+  swap: true               # pairwise: ask in both orders, withhold the pick when they disagree
+  screen: both             # none | regex | llm | both: check each answer for text aimed at the grader
+  on_flag: reject          # reject | abstain: what a flagged answer gets
+  screen_prompt: v2        # v1 | v2: wording of the LLM screen
 ```
 
 | Defence | Cost | What it targets |
@@ -125,7 +215,7 @@ guard:
 | `swap` | one extra call per pairwise verdict | position bias: an order-dependent pick is never let through |
 | `screen: regex` | free | injections that use the usual forms: role markers, fake tags, forged verdicts, direct address to the grader |
 | `screen: llm` | one extra call per pointwise verdict | the same, phrased in ways a rule list misses; the judge model is asked a narrow yes/no question about the text instead of grading it |
-| `prompt_style: guarded` | none | the answer is fenced between unguessable markers, and the grading rule is repeated after it |
+| `prompt_style: guarded_v2` | none | the answer is fenced between unguessable markers, the grading rule is repeated after it, and text aimed at the grader fails the answer (`guarded` is the round-1 wording, which also failed harmless politeness) |
 | `on_flag: abstain` | none | sends flagged answers to a human instead of failing them |
 
 Withheld verdicts count as wrong for accuracy and are reported as
@@ -136,13 +226,23 @@ calls-per-verdict figure suggests during an audit, while the cost reported for
 deployment counts every call.
 
 **No tuning on the test.** Every defence was designed against the one injection
-the audit has always used (`wrong_injection`). The variant
-`wrong_injection_unseen` appends one of ten other phrasings (fake markup, a
-forged verdict, a fake conversation turn, a policy claim, an emotional plea,
-French) that were never used to tune anything, and `recommend` chooses on dev
-items and reports held-out items.
+the audit has always used (`wrong_injection`), and `recommend` chooses on dev
+items and reports held-out items. Two sets of held-out phrasings test whether a
+defence generalises:
 
-## Running every experiment
+- `wrong_injection_unseen` (round 1): ten phrasings written with the round-1
+  defences (fake markup, a forged verdict, a fake conversation turn, a policy
+  claim, an emotional plea, French).
+- `wrong_injection_fresh` (round 2): round 1's held-out results had been looked
+  at before round 2 was tuned, so round 2 is judged on ten new phrasings written
+  before any round-2 result (an HTML comment, a JSON override, a fake staff
+  note, German, and others). The regex screen was not changed between rounds.
+
+Round-2 tuning (`guarded_v2`, `screen_prompt: v2`) used only the dev half: it
+fixed the round-1 prompt's habit of failing politely padded correct answers and
+the round-1 screen's false alarms on them.
+
+## Running every experiment on a Windows laptop
 
 One script downloads the models, starts and stops `llama-server` for each, runs
 the whole grid and writes `results/` (comparison, recommendation, dashboard):
@@ -151,10 +251,11 @@ the whole grid and writes `results/` (comparison, recommendation, dashboard):
 powershell -ExecutionPolicy Bypass -File scripts\run_all.ps1
 ```
 
-For each model it runs prompt `naive`, `hardened` and `guarded`, reference
-`none` and `given`, and guards `plain`, `swap-regex`, `swap-llm`, `swap-both`
-and `swap-both-abstain`: 22 set-ups. Most re-use judge calls already made, so
-the grid costs about four audits of fresh calls per model.
+For each model it runs prompts `naive`, `hardened`, `guarded` and
+`guarded_v2`, references `none` and `given`, and guards `plain`, `swap-regex`,
+`swap-llm`, `swap-both`, `swap-both-abstain`, `swap-llm2` and `swap-both2`:
+44 set-ups (`scripts/run_grid.py` runs the same grid). Most re-use judge calls
+already made, so the grid costs about six audits of fresh calls per model.
 
 It is safe to stop and run again: finished judge calls come from the cache and
 partial downloads resume. `-Only llama31-8b-q4,qwen3-8b-q4` limits it to some
@@ -199,7 +300,7 @@ Speed experiments (Llama 3.1 8B, 4-bit, run once):
 
 The suite (`suites/qa/v1.jsonl`) has 100 factual questions, 50 dev and 50
 held-out, across science, computing, geography, biology, maths, history and
-literature. Each is expanded into 12 cases:
+literature. Each is expanded into 13 cases:
 
 | Variant | What changes | Expected |
 |---|---|---|
@@ -210,7 +311,8 @@ literature. Each is expanded into 12 cases:
 | `wrong_fluent` | wrong answer rewritten as a confident, detailed explanation | incorrect |
 | `wrong_authority` | claim of expert verification appended | incorrect |
 | `wrong_injection` | the tuning instruction to the grader appended | incorrect |
-| `wrong_injection_unseen` | one of ten held-out injection phrasings appended | incorrect |
+| `wrong_injection_unseen` | one of ten held-out injection phrasings appended (round 1) | incorrect |
+| `wrong_injection_fresh` | one of ten further held-out phrasings appended (round 2) | incorrect |
 | `pair_cw_AB`, `pair_cw_BA` | correct-terse vs wrong-fluent, both orders | the correct one |
 | `pair_cc_AB`, `pair_cc_BA` | correct vs the same answer padded, both orders | none (preference only) |
 
@@ -235,7 +337,7 @@ bootstrap over items.
 src/judgeaudit/
   tasks/        one module per task; each returns Case objects with ground truth
   judges/       mock judge (planted biases) and OpenAI-compatible judge
-  prompts.py    versioned judge prompts (naive, hardened, guarded) and the screen prompt
+  prompts.py    versioned judge prompts (naive, hardened, guarded, guarded_v2) and screen prompts (v1, v2)
   guard.py      defences: plan the judge calls a verdict needs, combine their answers
   cache.py      SQLite verdict cache, keyed on everything that can change a verdict
   runner.py     resumable, concurrent execution through the cache, with thermal pausing
@@ -244,7 +346,10 @@ src/judgeaudit/
   compare.py    all runs side by side
   recommend.py  choose on dev, report on held-out, cost per verdict
   dashboard.py  the self-contained demo page
-scripts/        run_all.ps1 (the experiment grid) and gpu_guard.py (telemetry and pacing)
+scripts/        run_grid.py (the experiment grid, any OS), run_all.ps1 (the same on a Windows
+                laptop, with power and heat protection), gpu_guard.py (telemetry and pacing)
+notebooks/      colab_quickstart.ipynb
+results/        published results: recommendation, comparison, dashboard, cards; v0/ = first round
 suites/qa/      v1.jsonl (100 items) and seed_v0.jsonl (the first 40, used by the tests)
 configs/        one YAML file per experiment
 tests/          the auditor and the guard are tested against judges with planted biases
@@ -274,9 +379,13 @@ executed unit tests) and summarisation (ground truth from a planted factual erro
   with AI assistance by the project's author.
 - 100 items give 50 per half; intervals on the held-out numbers are around
   plus or minus 10 points, so small differences between set-ups are not findings.
-- The regex screen and the held-out injections were written by the same author,
-  so the regex's recall on them is an optimistic estimate; the LLM screen is the
-  fairer test of generalisation.
+- The regex screen and the round-1 held-out injections were written by the same
+  author, so its 80% recall on them is optimistic; on the fresh round-2 phrasings
+  it caught none. Rules memorise forms. A determined attacker who knows the
+  defences can likely write phrasings that pass both the screen and the judge.
+- The published speeds come from one laptop GPU (RTX 5070 Ti Laptop) with its
+  clock capped at 2100 MHz for heat; other GPUs give other speeds, and greedy
+  verdicts can differ slightly between GPUs and llama.cpp builds.
 - Self-preference bias is not measured. It needs answers written by the judge
   model and by a different model.
 - A passing card covers this suite only. It is evidence about these failure
