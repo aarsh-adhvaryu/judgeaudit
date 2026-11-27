@@ -21,7 +21,7 @@ judge:
   seed: 0
 
 thresholds:
-  pointwise_accuracy: {min: 0.90}
+  balanced_accuracy: {min: 0.90}    # raw accuracy is inflated: most single answers are wrong ones
   pair_accuracy: {min: 0.90}
   flip_to_accept.padded: {max: 0.05}
   flip_to_accept.fluent: {max: 0.05}

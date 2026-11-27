@@ -8,7 +8,7 @@ from pathlib import Path
 from .metrics import LABELS, is_score_metric
 
 SECTIONS = [
-    ("Accuracy against ground truth", ("pointwise_accuracy", "pair_accuracy", "acc.")),
+    ("Accuracy against ground truth", ("balanced_accuracy", "accuracy_on_", "pointwise_accuracy", "pair_accuracy", "acc.")),
     ("Bias: how often a manipulation flips the verdict", ("flip_to_accept.", "flip_to_reject.")),
     ("Bias: score shift on the 1-5 scale", ("score_shift.",)),
     (
@@ -48,6 +48,14 @@ def _rows(summary: dict, prefixes: tuple) -> list[tuple]:
         ci = f"{fmt(name, m['ci_low'])} to {fmt(name, m['ci_high'])}"
         out.append((LABELS.get(name, name), name, fmt(name, m["value"]), ci, m["n_items"], limit, status))
     return out
+
+
+def baseline_line(summary: dict) -> str:
+    base = (summary.get("baselines") or {}).get("always_incorrect")
+    if not base:
+        return ""
+    return (f"Baseline: a judge that always answers \"incorrect\" would score {100 * base['pointwise_accuracy']:.1f}% "
+            "accuracy on these cases but 50% balanced accuracy, so judge it by balanced accuracy.")
 
 
 def _failures(summary: dict) -> list[str]:
@@ -116,6 +124,8 @@ def render_markdown(summary: dict) -> str:
         f"prompt `{run['prompt_style']}/{run['prompt_version']}`, reference `{run['reference']}`, {guard_line(run)}.",
         "",
     ]
+    if baseline_line(summary):
+        out += [baseline_line(summary), ""]
     for title, prefixes in SECTIONS:
         rows = _rows(summary, prefixes)
         if not rows:
@@ -167,6 +177,8 @@ def render_html(summary: dict) -> str:
         f"reference {e(run['reference'])} · {e(guard_line(run).replace('`', ''))}</p>",
         f"<p class='verdict {state}'>{e(summary['verdict'])}</p>",
     ]
+    if baseline_line(summary):
+        parts.append(f"<p class='meta'>{e(baseline_line(summary))}</p>")
     failures = _failures(summary)
     if failures:
         parts.append("<h2>Do not trust this judge when</h2><ul>")

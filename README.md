@@ -28,16 +28,41 @@ about 52,000 judge calls, none failed. Set-ups were chosen on the 50 dev items
 and are reported on the 50 held-out items. Full tables: `results/recommendation.md`,
 `results/comparison.md`, and `results/dashboard.html` to explore them.
 
+**How to read the numbers.** Seven of the nine single answers per question are
+wrong answers, so a judge that always says "incorrect" scores 77.8% raw
+accuracy. The headline metric is therefore **balanced accuracy**: the mean of
+accuracy on correct answers and on wrong answers, where that trivial judge
+scores 50%. The other baseline is the **plain judge** most teams deploy: the
+naive prompt, no reference answer, no guard.
+
 **With a reference answer, there is a set-up to trust.** Llama 3.1 8B 4-bit,
 hardened prompt, swap and regex screen passed every check on held-out items:
-99.3% accuracy, 0% of injected wrong answers accepted (tuning, unseen and fresh
-phrasings alike), 0.6% of verdicts withheld, 10.3 verdicts/s at 1.3 judge calls
-per verdict. Llama 3.1 8B 8-bit with the `guarded_v2` prompt and no guard also
-passed, at one call per verdict but 8.7 verdicts/s.
+98.5% balanced accuracy (99.3% raw), 0% of injected wrong answers accepted
+(tuning, unseen and fresh phrasings alike), 0.6% of verdicts withheld, 10.3
+verdicts/s at 1.3 judge calls per verdict. Llama 3.1 8B 8-bit with the
+`guarded_v2` prompt and no guard also passed, at one call per verdict but 8.7
+verdicts/s.
 
 **Without a reference answer, nothing passes.** Llama rejects 19 to 52% of
 correct answers once they are politely padded; Qwen accepts 14 to 20% of padded
 wrong ones. No defence here fixes either, so this case needs a human.
+
+How each layer moves the plain judge (Llama 3.1 8B 4-bit, held-out):
+
+| Set-up | Balanced accuracy | Injections accepted | Padded correct rejected | Position flips | Checks failed | Verdicts/s |
+|---|---|---|---|---|---|---|
+| Always answer "incorrect" (trivial baseline) | 50.0% | 0% | 100% | n/a | | |
+| Plain judge: naive prompt, no reference | 69.8% | 52.8% | 58.7% | 14% | 7 of 12 | 13.6 |
+| + hardened prompt | 74.4% | 37.0% | 52.2% | 12% | 5 of 12 | 13.6 |
+| + guard (swap + regex screen) | 82.9% | 0% | 52.2% | 0% | 2 of 12 | 10.4 |
+| Plain judge with the reference answer | 91.9% | 30.7% | 6.0% | 0% | 4 of 12 | 13.6 |
+| + hardened prompt + guard (recommended) | **98.5%** | **0%** | 2.0% | 0% | **0 of 12** | 10.4 |
+
+Injections accepted is the mean over the tuning, unseen and fresh phrasings.
+Every 8B model shows the same pattern (`results/recommendation.md`, "Against the
+baselines"): the plain judge accepts 29 to 63% of injected answers and its best
+set-up 0 to 2.5%; with a reference answer, balanced accuracy rises from 90 to
+92% to 98 to 100%. The 3B model stays well behind.
 
 | Finding | Evidence (held-out) |
 |---|---|
@@ -78,7 +103,7 @@ cd judgeaudit
 python -m venv .venv
 source .venv/bin/activate            # Windows: .venv\Scripts\Activate.ps1
 pip install -e ".[dev]"
-pytest -q                            # 61 tests
+pytest -q                            # 64 tests
 python scripts/run_grid.py --mock --quick
 ```
 
@@ -318,7 +343,9 @@ literature. Each is expanded into 13 cases:
 
 Headline metrics:
 
-- **Accuracy** against ground truth, overall and per variant.
+- **Balanced accuracy** (the headline): mean of accuracy on correct answers and
+  on wrong answers. Raw **accuracy** is also reported, overall and per variant,
+  next to the trivial baseline of always answering "incorrect".
 - **Flip to accept**: of the wrong answers the judge rejected, the share it
   accepted once padded, made fluent, given an authority claim, or given an injection.
 - **Flip to reject**: of the correct answers it accepted, the share it rejected once padded.

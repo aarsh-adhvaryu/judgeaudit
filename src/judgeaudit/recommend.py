@@ -19,6 +19,7 @@ from .compare import load_runs
 from .report import fmt
 
 KEY_METRICS = [
+    ("balanced_accuracy", "Balanced accuracy"),
     ("pointwise_accuracy", "Accuracy"),
     ("pair_accuracy", "Pair accuracy"),
     ("flip_to_accept.injection", "Injection accepted"),
@@ -71,7 +72,9 @@ def candidates(runs_dir: str | Path, include_mock: bool = False) -> list[dict]:
                 "dev_failed": [c["metric"] for c in dev["checks"] if c["passed"] is False],
                 "dev_unmeasured": [c["metric"] for c in dev["checks"] if c["passed"] is None],
                 "dev_passed": dev["passed"],
-                "dev_accuracy": dev["metrics"].get("pointwise_accuracy", {}).get("value"),
+                # balanced accuracy when the suite has both kinds of answer, else raw accuracy
+                "dev_accuracy": (dev["metrics"].get("balanced_accuracy") or dev["metrics"].get("pointwise_accuracy") or {}).get("value"),
+                "baselines": r.get("baselines", {}),
                 "heldout_passed": held["passed"],
                 "heldout_failed": [c["metric"] for c in held["checks"] if c["passed"] is False],
                 "heldout": {name: held["metrics"].get(name) for name, _ in KEY_METRICS},
@@ -137,6 +140,49 @@ def _setup(c: dict) -> str:
     return f"`{c['model']}` · prompt {c['prompt']} · guard {c['guard']}"
 
 
+def _value(c: dict | None, name: str) -> float | None:
+    m = (c or {}).get("heldout", {}).get(name)
+    return None if not m else m["value"]
+
+
+def _pct(value: float | None) -> str:
+    return "" if value is None else f"{100 * value:.1f}%"
+
+
+def _injection(c: dict | None) -> float | None:
+    values = [v for v in (_value(c, n) for n in ("flip_to_accept.injection", "flip_to_accept.injection_unseen",
+                                                  "flip_to_accept.injection_fresh")) if v is not None]
+    return sum(values) / len(values) if values else None
+
+
+def baseline_table(cands: list[dict], chosen: dict) -> list[str]:
+    """Each model's plain judge (naive prompt, no guard) against its best set-up, held-out."""
+    base = next((c["baselines"].get("always_incorrect") for c in cands if c.get("baselines")), None)
+    out = ["## Against the baselines", ""]
+    if base:
+        out += [f"A judge that always answers \"incorrect\" scores {100 * base['pointwise_accuracy']:.1f}% accuracy on this "
+                "suite, because most single answers in it are wrong, but only 50% balanced accuracy. The plain judge is "
+                "what most teams deploy: the naive prompt and no guard. All numbers are held-out.", ""]
+    header = ["Model", "Reference", "Plain judge: balanced accuracy", "Plain judge: injections accepted",
+              "Best set-up", "Best: balanced accuracy", "Best: injections accepted", "Checks failed: plain to best"]
+    out += ["| " + " | ".join(header) + " |", "|" + "---|" * len(header)]
+    for ref, _ in USE_CASES:
+        for best in (chosen.get(ref) or {}).get("per_model", []):
+            plain = next((c for c in cands if c["model"] == best["model"] and c["reference"] == ref
+                          and c["prompt"] == "naive" and c["guard"] == "none"), None)
+            if plain is None:
+                continue
+            out.append("| " + " | ".join([
+                f"`{best['model']}`", ref,
+                _pct(_value(plain, "balanced_accuracy")), _pct(_injection(plain)),
+                f"prompt {best['prompt']} · guard {best['guard']}",
+                _pct(_value(best, "balanced_accuracy")), _pct(_injection(best)),
+                f"{len(plain['heldout_failed'])} to {len(best['heldout_failed'])}",
+            ]) + " |")
+    out += ["", "Injections accepted is the mean over the three injection sets (tuning, unseen, fresh).", ""]
+    return out
+
+
 def render(cands: list[dict], chosen: dict) -> str:
     out = [
         "# Which judge set-up to use",
@@ -174,6 +220,7 @@ def render(cands: list[dict], chosen: dict) -> str:
             vps = f"{p['verdicts_per_s']:.1f}" if p["verdicts_per_s"] else "?"
             out.append(f"- {_setup(p)}: {len(p['dev_failed'])} dev checks failed, {vps} verdicts/s")
         out.append("")
+    out += baseline_table(cands, chosen)
     out += [f"{len(cands)} set-ups compared. Full numbers: `comparison.csv`; per-run cards: `runs/<run>/report.html`.", ""]
     return "\n".join(out)
 

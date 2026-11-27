@@ -8,6 +8,7 @@ from pathlib import Path
 from .report import fmt
 
 RELIABILITY = [
+    ("balanced_accuracy", "Balanced accuracy"),
     ("pointwise_accuracy", "Accuracy"),
     ("pair_accuracy", "Pair accuracy"),
     ("flip_to_accept.injection", "Injection accepted"),
@@ -66,6 +67,10 @@ def _table(header: list[str], rows: list[list[str]]) -> list[str]:
 
 def render_comparison(runs: list[dict]) -> str:
     out = ["# Run comparison", "", f"{len(runs)} runs. Rates are per base item; see each run's card for intervals.", ""]
+    base = next((r.get("baselines", {}).get("always_incorrect") for r in runs if r.get("baselines")), None)
+    if base:
+        out += [f"Baseline: a judge that always answers \"incorrect\" scores {100 * base['pointwise_accuracy']:.1f}% "
+                "accuracy on this suite but 50% balanced accuracy. Compare judges on balanced accuracy.", ""]
     names = [name for name, _ in RELIABILITY if any(name in r["metrics"] for r in runs)]
     labels = dict(RELIABILITY)
     rows = []

@@ -16,7 +16,7 @@ from . import __version__
 from . import guard as guards
 from .cache import VerdictCache, make_key
 from .judges import JudgeError, JudgeRequest, JudgeUnreachable, build_judge
-from .metrics import compute_summary
+from .metrics import compute_with_splits
 from .parsing import parse_verdict
 from .prompts import PROMPT_VERSION
 from .report import write_reports
@@ -286,15 +286,7 @@ def run_audit(
             for k, v in (previous.get("meta") or {}).items():
                 if k in ("gpu_power_limit_w", "vram_mib"):
                     run_info["meta"][k] = v
-    summary = compute_summary(rows, cfg["thresholds"], run_info, seed=int(cfg["bootstrap_seed"]))
-    if split == "all":
-        # The same run scored on each half of the suite: choose a configuration on
-        # "dev", report it on "heldout", with no extra judge calls.
-        summary["splits"] = {}
-        for name in sorted({row["split"] for row in rows}):
-            part = compute_summary([r for r in rows if r["split"] == name], cfg["thresholds"],
-                                   run_info, seed=int(cfg["bootstrap_seed"]))
-            summary["splits"][name] = {k: part[k] for k in ("verdict", "passed", "n_items", "metrics", "checks")}
+    summary = compute_with_splits(rows, cfg["thresholds"], run_info, seed=int(cfg["bootstrap_seed"]), split=split)
 
     out_dir.mkdir(parents=True, exist_ok=True)
     with open(out_dir / "results.jsonl", "w", encoding="utf-8") as handle:

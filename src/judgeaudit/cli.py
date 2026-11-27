@@ -10,7 +10,7 @@ from .compare import write_comparison
 from .dashboard import build_dashboard
 from .config import load_config
 from .judges import JudgeError
-from .metrics import compute_summary
+from .metrics import compute_with_splits
 from .recommend import write_recommendation
 from .report import write_reports
 from .runner import run_audit
@@ -37,18 +37,21 @@ def _cmd_run(args) -> int:
 
 
 def _cmd_report(args) -> int:
-    run_dir = Path(args.run_dir)
-    old = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
-    with open(run_dir / "results.jsonl", encoding="utf-8") as handle:
-        rows = [json.loads(line) for line in handle if line.strip()]
-    thresholds = load_config(args.config)["thresholds"] if args.config else {
-        c["metric"]: {c["op"]: c["limit"]} for c in old["checks"]
-    }
-    summary = compute_summary(rows, thresholds, old["run"])
-    write_reports(summary, run_dir)
-    print(f"[judgeaudit] verdict: {summary['verdict']}")
-    print(f"[judgeaudit] report: {run_dir / 'report.html'}")
-    return 1 if args.gate and not summary["passed"] else 0
+    """Re-score finished runs from their saved verdicts: no judge calls."""
+    code = 0
+    new_thresholds = load_config(args.config)["thresholds"] if args.config else None
+    for run_dir in map(Path, args.run_dir):
+        old = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
+        with open(run_dir / "results.jsonl", encoding="utf-8") as handle:
+            rows = [json.loads(line) for line in handle if line.strip()]
+        thresholds = new_thresholds or {c["metric"]: {c["op"]: c["limit"]} for c in old["checks"]}
+        split = old["run"].get("split", "all")
+        summary = compute_with_splits(rows, thresholds, old["run"], split=split if "splits" in old else "none")
+        write_reports(summary, run_dir)
+        print(f"[judgeaudit] {run_dir.name}: {summary['verdict']}")
+        if args.gate and not summary["passed"]:
+            code = 1
+    return code
 
 
 def _cmd_compare(args) -> int:
@@ -115,7 +118,7 @@ def main(argv: list[str] | None = None) -> int:
     dash.set_defaults(func=_cmd_dashboard)
 
     report = sub.add_parser("report", help="rebuild the card from a finished run, optionally with new thresholds")
-    report.add_argument("run_dir")
+    report.add_argument("run_dir", nargs="+", help="one or more run folders")
     report.add_argument("-c", "--config", help="take thresholds from this config instead")
     report.add_argument("--gate", action="store_true")
     report.set_defaults(func=_cmd_report)

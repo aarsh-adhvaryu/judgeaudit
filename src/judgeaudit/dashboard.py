@@ -10,7 +10,7 @@ import html
 import json
 from pathlib import Path
 
-from .recommend import KEY_METRICS, USE_CASES, candidates, choose, speed
+from .recommend import KEY_METRICS, USE_CASES, _injection, _value, candidates, choose, speed
 
 PALETTE = ["#4269d0", "#efb118", "#ff725c", "#6cc5b0", "#a463f2", "#97bbf5", "#9c6b4e", "#3ca951"]
 
@@ -32,12 +32,12 @@ def _codes(rows: list[dict], order: list[str]) -> tuple[str, str]:
     return "".join(verdicts), "".join(flags)
 
 
-def _scatter(points: list[dict], models: list[str], title: str) -> str:
+def _scatter(points: list[dict], models: list[str], title: str, floor: float | None = None) -> str:
     w, h, left, bottom, top, right = 460, 300, 52, 40, 28, 16
     xs = [p["x"] for p in points if p["x"]] or [1]
     x_step = next(step for step in (1, 2, 5, 10, 20, 50, 100, 200, 500) if max(xs) / step <= 6)
     x_max = x_step * (int(max(xs) * 1.04 / x_step) + 1)
-    y_min = max(0.0, int(min([p["y"] for p in points] + [0.6]) * 10) / 10)
+    y_min = max(0.0, int(min([p["y"] for p in points] + [0.6] + ([floor] if floor is not None else [])) * 10) / 10)
     y_steps = round((1 - y_min) / 0.1)
 
     def sx(v):
@@ -56,12 +56,15 @@ def _scatter(points: list[dict], models: list[str], title: str) -> str:
         x = x_step * i
         parts.append(f"<text x='{sx(x):.1f}' y='{h - bottom + 16}' class='tick' text-anchor='middle'>{x:.0f}</text>")
     parts.append(f"<text x='{(w + left) / 2}' y='{h - 6}' class='tick' text-anchor='middle'>verdicts per second (higher is cheaper)</text>")
+    if floor is not None:
+        parts.append(f"<line x1='{left}' x2='{w - right}' y1='{sy(floor):.1f}' y2='{sy(floor):.1f}' class='floor'/>"
+                     f"<text x='{w - right - 4}' y='{sy(floor) - 5:.1f}' class='tick' text-anchor='end'>always 'incorrect'</text>")
     for p in points:
         if not p["x"]:
             continue
         color = PALETTE[models.index(p["model"]) % len(PALETTE)]
         fill = color if p["guarded"] else "none"
-        label = html.escape(f"{p['model']} · {p['prompt']} · {p['guard']}: {100 * p['y']:.1f}% accurate (held-out), "
+        label = html.escape(f"{p['model']} · {p['prompt']} · {p['guard']}: {100 * p['y']:.1f}% balanced accuracy (held-out), "
                             f"{p['x']:.1f} verdicts/s, {p['failed']} dev checks failed")
         shape = (f"<circle cx='{sx(p['x']):.1f}' cy='{sy(p['y']):.1f}' r='5' fill='{fill}' stroke='{color}' stroke-width='2'>"
                  f"<title>{label}</title></circle>")
@@ -81,7 +84,7 @@ main{max-width:1180px;margin:0 auto;padding:24px 16px 64px}h1{font-size:1.6rem;m
 .card{background:var(--card);border-radius:10px;padding:14px 16px;border:1px solid var(--line)}.card h3{margin:0 0 6px;font-size:1rem}
 .big{font-size:1.05rem;font-weight:600}.charts{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:14px}
 svg{width:100%;height:auto;background:var(--card);border-radius:10px;border:1px solid var(--line)}
-.ct{font-weight:600;font-size:13px;fill:var(--fg)}.tick{font-size:11px;fill:var(--muted)}.grid{stroke:var(--line)}.ring{stroke:var(--fg);stroke-width:1.2}
+.ct{font-weight:600;font-size:13px;fill:var(--fg)}.floor{stroke:var(--muted);stroke-dasharray:4 4}.tick{font-size:11px;fill:var(--muted)}.grid{stroke:var(--line)}.ring{stroke:var(--fg);stroke-width:1.2}
 .legend{display:flex;flex-wrap:wrap;gap:12px;font-size:.85rem;margin:8px 0}.legend span{display:inline-flex;align-items:center;gap:6px}
 .dot{width:11px;height:11px;border-radius:50%;display:inline-block}
 .wrap{overflow-x:auto;border:1px solid var(--line);border-radius:10px}table{border-collapse:collapse;width:100%;font-size:.85rem}
@@ -193,12 +196,18 @@ def build_dashboard(runs_dir: str | Path, out_path: str | Path, include_mock: bo
         best = chosen[ref]["best"]
         parts.append(f"<div class='card'><h3>{e(title)}</h3>")
         if pick:
-            acc = pick["heldout"].get("pointwise_accuracy") or {}
+            plain = next((c for c in cands if c["model"] == pick["model"] and c["reference"] == ref
+                          and c["prompt"] == "naive" and c["guard"] == "none"), None)
+            versus = ""
+            if plain is not None:
+                versus = (f" The plain judge on the same model: {100 * (_value(plain, 'balanced_accuracy') or 0):.1f}% balanced "
+                          f"accuracy, {100 * (_injection(plain) or 0):.0f}% of injected answers accepted.")
             parts.append(f"<p class='big'>{e(pick['model'])} · {e(pick['prompt'])} prompt · guard {e(pick['guard'])}</p>"
                          f"<p>{speed(pick)} verdicts/s, {pick['calls_per_verdict']:g} calls per verdict. "
-                         f"Held-out accuracy {100 * (acc.get('value') or 0):.1f}%; "
+                         f"Held-out balanced accuracy {100 * (_value(pick, 'balanced_accuracy') or 0):.1f}%, "
+                         f"{100 * (_injection(pick) or 0):.0f}% of injected answers accepted; "
                          + ("passed every held-out check." if pick["heldout_passed"] else "held-out failures: " + e(", ".join(pick["heldout_failed"])))
-                         + "</p>")
+                         + e(versus) + "</p>")
         else:
             parts.append(f"<p class='big'>No set-up passed every check.</p><p>Closest: {e(best['model'])} · {e(best['prompt'])} · "
                          f"guard {e(best['guard'])}; failed {e(', '.join(best['dev_failed']))} on dev. Keep a human in the loop.</p>")
@@ -209,14 +218,16 @@ def build_dashboard(runs_dir: str | Path, out_path: str | Path, include_mock: bo
     for i, m in enumerate(models):
         parts.append(f"<span><i class='dot' style='background:{PALETTE[i % len(PALETTE)]}'></i>{e(m)}</span>")
     parts.append("<span>hollow = plain judge, filled = guarded, ringed = passed every dev check</span></div>"
-                 "<p class='muted'>Up is more accurate, right is cheaper. Hover a point for its set-up. A withheld verdict counts "
-                 "as wrong, so set-ups that send many cases to a human (the abstain guard) sit low.</p><div class='charts'>")
+                 "<p class='muted'>Up is more accurate (balanced accuracy, so the dashed line at 50% is a judge that always "
+                 "answers 'incorrect'), right is cheaper. Hover a point for its set-up. A withheld verdict counts as wrong, so "
+                 "set-ups that send many cases to a human (the abstain guard) sit low.</p><div class='charts'>")
     for ref, title in USE_CASES:
-        pts = [{"x": c["verdicts_per_s"], "y": (c["heldout"].get("pointwise_accuracy") or {}).get("value") or 0,
+        pts = [{"x": c["verdicts_per_s"], "y": _value(c, "balanced_accuracy") or _value(c, "pointwise_accuracy") or 0,
                 "model": c["model"], "prompt": c["prompt"], "guard": c["guard"], "guarded": c["guard"] != "none",
                 "trusted": c["dev_passed"], "failed": len(c["dev_failed"])} for c in cands if c["reference"] == ref]
         if pts:
-            parts.append(_scatter(pts, models, f"{title}: held-out accuracy"))
+            short = "With a reference answer" if ref == "given" else "Without a reference answer"
+            parts.append(_scatter(pts, models, f"{short}: held-out balanced accuracy", floor=0.5))
     parts.append("</div>")
 
     parts.append("<h2>Every set-up</h2><div class='controls'><label>Reference <select id='fref'><option value=''>all</option>"

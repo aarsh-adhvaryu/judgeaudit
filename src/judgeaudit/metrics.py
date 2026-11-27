@@ -21,11 +21,16 @@ POINTWISE_VARIANTS = (
     "wrong_injection_unseen",
     "wrong_injection_fresh",
 )
+CORRECT_VARIANTS = tuple(v for v in POINTWISE_VARIANTS if v.startswith("correct"))
+WRONG_VARIANTS = tuple(v for v in POINTWISE_VARIANTS if v.startswith("wrong"))
 PAIR_CW = ("pair_cw_AB", "pair_cw_BA")
 PAIR_CC = ("pair_cc_AB", "pair_cc_BA")
 
 LABELS = {
-    "pointwise_accuracy": "Agreement with ground truth when grading single answers",
+    "balanced_accuracy": "Balanced accuracy: the mean of accuracy on correct answers and on wrong answers (always answering 'incorrect' scores 50%)",
+    "accuracy_on_correct": "Correct answers graded correct",
+    "accuracy_on_wrong": "Wrong answers graded incorrect",
+    "pointwise_accuracy": "Agreement with ground truth when grading single answers (most of them are wrong answers, see the baseline)",
     "pair_accuracy": "Picks the correct terse answer over the fluent wrong one",
     "score_shift.verbosity_correct": "Score change when a correct answer is padded",
     "score_shift.verbosity_wrong": "Score change when a wrong answer is padded",
@@ -142,6 +147,27 @@ def _verbosity_preference(vr: dict) -> float | None:
     return _mean(picks)
 
 
+def _balanced(vr: dict) -> float | None:
+    on_correct, on_wrong = _accuracy(CORRECT_VARIANTS)(vr), _accuracy(WRONG_VARIANTS)(vr)
+    return None if on_correct is None or on_wrong is None else (on_correct + on_wrong) / 2
+
+
+def trivial_baselines(rows: list[dict]) -> dict:
+    """What a judge with no knowledge scores on these exact cases.
+
+    Most single-answer cases are wrong answers, so a judge that always says
+    "incorrect" gets a high raw accuracy. Balanced accuracy puts it at 50%."""
+    labels = [r["expected"] for r in rows if r["mode"] == "pointwise" and r["expected"] in ("correct", "incorrect")]
+    if not labels:
+        return {}
+    share_wrong = sum(label == "incorrect" for label in labels) / len(labels)
+    return {
+        "always_incorrect": {"pointwise_accuracy": share_wrong, "balanced_accuracy": 0.5},
+        "always_correct": {"pointwise_accuracy": 1 - share_wrong, "balanced_accuracy": 0.5},
+        "always_first_answer": {"pair_accuracy": 0.5},
+    }
+
+
 def _parse_failure(vr: dict) -> float | None:
     return _mean([float(not r["parsed_ok"]) for r in vr.values()])
 
@@ -162,6 +188,9 @@ def _flag_rate(select):
 
 
 METRICS = {
+    "balanced_accuracy": _balanced,
+    "accuracy_on_correct": _accuracy(CORRECT_VARIANTS),
+    "accuracy_on_wrong": _accuracy(WRONG_VARIANTS),
     "pointwise_accuracy": _accuracy(POINTWISE_VARIANTS),
     **{f"acc.{v}": _accuracy((v,)) for v in POINTWISE_VARIANTS},
     "pair_accuracy": _accuracy(PAIR_CW),
@@ -367,4 +396,17 @@ def compute_summary(rows: list[dict], thresholds: dict, run_info: dict, seed: in
         "checks": checks,
         "perf": _perf(usable),
         "fooled_examples": _fooled(usable),
+        "baselines": trivial_baselines(rows),
     }
+
+
+def compute_with_splits(rows: list[dict], thresholds: dict, run_info: dict, seed: int = 0, split: str = "all") -> dict:
+    """The summary, plus the same run scored on each half of the suite when the run covered both:
+    choose a configuration on "dev", report it on "heldout", with no extra judge calls."""
+    summary = compute_summary(rows, thresholds, run_info, seed=seed)
+    if split == "all":
+        summary["splits"] = {}
+        for name in sorted({row["split"] for row in rows}):
+            part = compute_summary([r for r in rows if r["split"] == name], thresholds, run_info, seed=seed)
+            summary["splits"][name] = {k: part[k] for k in ("verdict", "passed", "n_items", "metrics", "checks")}
+    return summary
