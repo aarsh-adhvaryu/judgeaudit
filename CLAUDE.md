@@ -38,7 +38,9 @@ pacing (pause at 8 C of hotspot headroom). After any crash read the newest
 ## Rules
 - Never edit suite items to make a judge look better or worse.
 - Never tune a prompt, screen rule or threshold on held-out items or on
-  `wrong_injection_unseen`; tune on dev and the `wrong_injection` variant only.
+  `wrong_injection_unseen` / `wrong_injection_fresh`; tune on dev and the
+  `wrong_injection` variant only. Round-1 held-out results have been seen, so
+  any round-3 defence needs a new set of phrasings to be tested on.
 - A run with failed or unmeasured checks reports INCOMPLETE, never TRUSTED.
 - Commit result tables (`results/`), not the cache, models, runs or logs.
 
